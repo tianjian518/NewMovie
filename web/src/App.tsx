@@ -27,7 +27,7 @@ function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center">
       <form onSubmit={submit} className="bg-card p-8 rounded-xl w-80 space-y-4">
-        <h1 className="text-2xl font-bold text-center">Vidrive</h1>
+        <h1 className="text-2xl font-bold text-center">NewMovie</h1>
         <input className="w-full bg-ink rounded p-2" placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
         <input type="password" className="w-full bg-ink rounded p-2" placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} />
         {err && <p className="text-red-400 text-sm">{err}</p>}
@@ -107,7 +107,7 @@ export default function App() {
   return (
     <div className="min-h-screen flex">
       <aside className="w-48 bg-panel p-4 space-y-2 shrink-0">
-        <div className="text-xl font-bold mb-6">Vidrive</div>
+        <div className="text-xl font-bold mb-6">NewMovie</div>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/">媒体库</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/continue">继续观看</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/favorites">收藏</Link>

@@ -115,7 +115,7 @@ function StrmTips() {
       <h2 className="text-xl font-bold mb-3">STRM 方言支持</h2>
       <ul className="text-sm text-gray-400 list-disc list-inside space-y-1">
         <li>完整直链：<code>http://nas:5244/d/quark/电影/x.mkv</code></li>
-        <li>带签名：上述 URL 追加 <code>?sign=xxx:0</code>（自动忽略，Vidrive 重算）</li>
+        <li>带签名：上述 URL 追加 <code>?sign=xxx:0</code>（自动忽略，NewMovie 重算）</li>
         <li>URL 编码（Encode Path）：<code>/d/.../%E7%94%B5%E5%BD%B1/...</code>（自动解码）</li>
         <li>纯内部路径（Without Url）：<code>/quark/电影/x.mkv</code></li>
         <li>本地绝对路径（CloudDrive2）：<code>/mnt/cd2/quark/x.mkv</code></li>

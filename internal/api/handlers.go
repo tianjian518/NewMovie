@@ -25,7 +25,7 @@ import (
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.1"
+const Version = "1.1.2"
 
 // Server 持有依赖。
 type Server struct {

@@ -6,11 +6,13 @@ package main
 import (
 	"context"
 	"embed"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,8 +53,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Handler())
 
-	// 前端静态资源（dist 由构建产出；开发期占位页见 dist/index.html）
-	mux.Handle("/", http.FileServer(http.FS(dist)))
+	// 前端静态资源（dist 由构建产出）。
+	// 必须用 fs.Sub 剥掉 "dist" 这层前缀：embed.FS 的根是 dist 的**父目录**，
+	// 直接 http.FS(dist) 会让 "/" 列出目录（页面上只有一个 dist/ 链接），
+	// 且 index.html 里的 /assets/... 全部 404 → React 挂不上 → 白屏。
+	mux.Handle("/", spaHandler(dist))
 
 	log.Printf("NewMovie 启动 → %s  (data=%s, admin=%s)", cfg.Addr, cfg.DBFile, cfg.AdminUser)
 	log.Printf("健康检查: GET %s/api/health", cfg.Addr)
@@ -91,6 +96,64 @@ func main() {
 		log.Printf("存储关闭时落盘失败: %v", e)
 	}
 	log.Printf("已退出")
+}
+
+// spaHandler 提供前端单页应用：
+//  1. 用 fs.Sub 把 embed 根定位到 dist/ 内部，使 /assets/xxx.js 能正确命中；
+//  2. 命中真实文件则直接返回（带上合适的缓存头）；
+//  3. 未命中且不是 /api/ 的路径，一律回落到 index.html —— react-router 的
+//     前端路由（如 /library/xxx）刷新时才不会 404。
+func spaHandler(efs embed.FS) http.Handler {
+	sub, err := fs.Sub(efs, "dist")
+	if err != nil {
+		log.Printf("警告：无法定位内嵌的 dist 目录: %v", err)
+		return http.NotFoundHandler()
+	}
+	fileSrv := http.FileServer(http.FS(sub))
+
+	indexHTML, idxErr := fs.ReadFile(sub, "index.html")
+	if idxErr != nil {
+		log.Printf("警告：内嵌前端缺少 index.html（前端可能未构建）: %v", idxErr)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upath := strings.TrimPrefix(r.URL.Path, "/")
+		if upath == "" {
+			upath = "index.html"
+		}
+
+		// 真实存在的文件：交给 FileServer（自动处理 Content-Type / Range / 304）
+		if f, e := sub.Open(upath); e == nil {
+			if st, se := f.Stat(); se == nil && !st.IsDir() {
+				// 带内容哈希的构建产物可长期缓存；index.html 必须每次校验，
+				// 否则前端更新后用户一直拿到旧版本。
+				if strings.HasPrefix(upath, "assets/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else {
+					w.Header().Set("Cache-Control", "no-cache")
+				}
+				_ = f.Close()
+				fileSrv.ServeHTTP(w, r)
+				return
+			}
+			_ = f.Close()
+		}
+
+		// 其余路径回落到 index.html（前端路由接管）。
+		// 但 /api/ 已由前面的 mux 处理；这里再兜一次，避免误把接口 404 变成 HTML。
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+		if indexHTML == nil {
+			http.Error(w, "前端资源缺失：请确认镜像构建时已执行前端构建", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(indexHTML)
+	})
 }
 
 // listenWithRetry 监听端口，失败时退避重试，缓解「端口尚未释放」这类瞬时冲突。
