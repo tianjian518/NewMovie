@@ -12,7 +12,7 @@ RUN npm run build
 
 # ---- 阶段 2：后端构建（多架构交叉编译，零依赖，CGO 关闭） ----
 # 用 TARGETPLATFORM / TARGETARCH 让 go 直接交叉编译，无需 QEMU 模拟整条工具链。
-FROM --platform=$TARGETPLATFORM golang:1.23-alpine AS backend
+FROM golang:1.23-alpine AS backend
 WORKDIR /src
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -27,13 +27,18 @@ RUN GOARM=$( [ "$TARGETARCH" = "arm" ] && echo 7 || echo "" ) && \
     go build -ldflags="-s -w" -o /out/newmovie ./cmd/server
 
 # ---- 阶段 3：运行镜像（多架构） ----
-FROM --platform=$TARGETPLATFORM alpine:3.20 AS run
-RUN apk add --no-cache ca-certificates tzdata
+FROM alpine:3.20 AS run
+RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /app
 COPY --from=backend /out/newmovie /app/newmovie
+# 预建数据目录：未挂载卷时也能启动，避免因目录缺失反复失败重启。
+RUN mkdir -p /data
 EXPOSE 8096
 VOLUME ["/data"]
 ENV VIDRIVE_DATA=/data \
     VIDRIVE_ADDR=:8096 \
     TZ=Asia/Shanghai
+# 健康检查：让编排层能区分「启动中」与「真的挂了」，而不是盲目重启。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8096/api/health >/dev/null 2>&1 || exit 1
 ENTRYPOINT ["/app/newmovie"]

@@ -7,9 +7,11 @@ package store
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"newmovie/internal/model"
 )
@@ -56,11 +58,18 @@ type Store interface {
 	GetSetting(key string) (string, error)
 	SaveSetting(key, value string) error
 	ListSettings() (map[string]string, error)
+
+	// Close 立即把挂起的修改落盘（进程退出前调用）。
+	Close() error
 }
 
 type db struct {
-	mu sync.Mutex
+	mu   sync.Mutex
 	path string
+
+	dirty  bool        // 有未落盘的修改
+	timer  *time.Timer // 合并落盘定时器
+	closed bool        // 已关闭：此后每次写入立即落盘
 
 	Storages  []model.Storage  `json:"storages"`
 	Libraries []model.Library  `json:"libraries"`
@@ -84,7 +93,43 @@ func NewJSONStore(path string) (Store, error) {
 	return d, nil
 }
 
+// flushDebounce 是合并落盘的等待窗口。
+// 扫描时每入库一个条目就全量序列化整个库，是 O(n²) 的：1 万条目要写 1 万次、
+// 每次都比上次更大，累计分配可达数 GB，在 ARM(NAS/树莓派) 这类弱 CPU/小内存设备上
+// 会把进程拖垮甚至被 OOM Killer 杀掉 → 容器重启 → 重新扫描 → 再被杀，形成无限重启。
+// 改为合并写：窗口内的多次修改只落盘一次。
+const flushDebounce = 400 * time.Millisecond
+
+// flush 标记脏数据并安排一次合并落盘（调用方持有 d.mu）。
 func (d *db) flush() error {
+	d.dirty = true
+	if d.closed {
+		return d.writeLocked()
+	}
+	if d.timer == nil {
+		d.timer = time.AfterFunc(flushDebounce, d.flushAsync)
+	} else {
+		d.timer.Reset(flushDebounce)
+	}
+	return nil
+}
+
+// flushAsync 定时器回调：加锁后真正落盘。
+func (d *db) flushAsync() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.writeLocked(); err != nil {
+		log.Printf("[store] 落盘失败: %v", err)
+	}
+}
+
+// writeLocked 原子写入（临时文件 + rename，调用方持有 d.mu）。
+// 原子性很关键：进程若在写到一半时被杀，直接 WriteFile 会留下半截 JSON，
+// 下次启动解析失败 → 数据全丢/启动异常。
+func (d *db) writeLocked() error {
+	if !d.dirty {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(d.path), 0o755); err != nil {
 		return err
 	}
@@ -92,7 +137,27 @@ func (d *db) flush() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.path, b, 0o644)
+	tmp := d.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, d.path); err != nil {
+		return err
+	}
+	d.dirty = false
+	return nil
+}
+
+// Close 立即落盘并停止定时器，供进程优雅退出时调用，防止丢失最后一批写入。
+func (d *db) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closed = true
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	return d.writeLocked()
 }
 
 func (d *db) SaveStorage(s model.Storage) error {

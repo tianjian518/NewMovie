@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"strings"
@@ -19,6 +20,11 @@ import (
 	"newmovie/internal/store"
 	"newmovie/internal/strm"
 )
+
+// MaxScanDepth 是目录递归的最大深度。
+// 真实媒体库极少超过 10 层（库根/剧名/季/文件），设为 24 已非常宽松；
+// 超过它几乎必然是目录成环或异常挂载，继续下钻只会把内存耗尽。
+const MaxScanDepth = 24
 
 // RateLimiter 简单令牌桶。
 type RateLimiter struct {
@@ -76,11 +82,29 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 		onProgress: onProgress,
 	}
 
-	var walk func(p string) error
-	walk = func(p string) error {
+	// 目录环 / 超深嵌套防护：
+	// 网盘（尤其挂载了软链、循环 rclone/webdav 映射的源）可能返回自引用目录，
+	// 无防护的递归会一直下钻 → 栈与内存爆掉 → 进程被 OOM Killer 杀死 →
+	// 容器 restart 策略再拉起 → 无限重启。这里用「深度上限 + 已访问集合」双保险。
+	visited := make(map[string]bool)
+
+	var walk func(p string, depth int) error
+	walk = func(p string, depth int) error {
 		if run.ctx.Err() != nil {
 			return run.ctx.Err()
 		}
+		if depth > MaxScanDepth {
+			log.Printf("[scan] 目录深度超过上限 %d，跳过：%s", MaxScanDepth, p)
+			return nil
+		}
+		// 规范化后判重，命中说明目录成环（或被重复挂载），直接跳过而非继续下钻。
+		key := path.Clean(p)
+		if visited[key] {
+			log.Printf("[scan] 检测到目录环，跳过：%s", p)
+			return nil
+		}
+		visited[key] = true
+
 		run.rl.Take() // 限速：风控核心
 		objs, err := run.client.List(p, false)
 		if err != nil {
@@ -91,9 +115,13 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 			names = append(names, o.Name)
 		}
 		for _, o := range objs {
+			// 跳过 . / .. 之类的自引用条目，否则同样会原地打转。
+			if o.Name == "." || o.Name == ".." || o.Name == "" {
+				continue
+			}
 			full := path.Join(p, o.Name)
 			if o.IsDir {
-				if err := walk(full); err != nil {
+				if err := walk(full, depth+1); err != nil {
 					return err
 				}
 				continue
@@ -108,7 +136,7 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 		return nil
 	}
 
-	err := walk(lib.RootPath)
+	err := walk(lib.RootPath, 0)
 	run.mu.Lock()
 	job.Done = run.done
 	job.Total = run.total

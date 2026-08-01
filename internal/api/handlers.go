@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -21,6 +23,9 @@ import (
 	"newmovie/internal/scraper"
 	"newmovie/internal/store"
 )
+
+// Version 是当前服务版本，健康检查与前端一并使用。
+const Version = "1.1.1"
 
 // Server 持有依赖。
 type Server struct {
@@ -79,8 +84,30 @@ func (s *Server) tmdbKey() string {
 	return ""
 }
 
-// Handler 返回 http.Handler。
-func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.route) }
+// Handler 返回 http.Handler（外层包一层 panic 恢复中间件）。
+//
+// net/http 自带的 per-connection recover 只能兜住处理器同步栈上的 panic，
+// 且默认会静默断开连接。这里显式恢复并回 500，同时打出堆栈便于定位；
+// 任何一个坏条目/坏数据都不会再把服务打挂。
+func (s *Server) Handler() http.Handler { return recoverMW(http.HandlerFunc(s.route)) }
+
+// recoverMW 捕获处理器 panic，避免单个请求击穿整个服务。
+func recoverMW(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if e := recover(); e != nil {
+				// ErrAbortHandler 是 net/http 约定的"静默中止"（如客户端断开），不当作错误。
+				if e == http.ErrAbortHandler {
+					panic(e)
+				}
+				log.Printf("[http] 处理 %s %s 时 panic 已恢复: %v\n%s", r.Method, r.URL.Path, e, debug.Stack())
+				defer func() { _ = recover() }() // 响应头可能已写出，忽略二次失败
+				writeErr(w, http.StatusInternalServerError, "服务器内部错误")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	p := strings.Trim(r.URL.Path, "/")
@@ -89,7 +116,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	// 免鉴权
 	switch {
 	case p == "api/health":
-		writeJSON(w, map[string]interface{}{"ok": true, "version": "1.1.0", "name": "NewMovie"})
+		writeJSON(w, map[string]interface{}{"ok": true, "version": Version, "name": "NewMovie"})
 		return
 	case p == "api/login" && r.Method == http.MethodPost:
 		s.login(w, r)
@@ -280,6 +307,19 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string)
 	// 用脱离请求的 context：避免 HTTP 响应返回后请求 ctx 被取消而中断后台扫描。
 	bg := context.Background()
 	go func() {
+		// 后台协程必须自带 recover：Go 里任何 goroutine panic 都会终止**整个进程**，
+		// 而容器 restart 策略会立刻把它拉起来，前端再次触发扫描 → 又 panic，
+		// 于是形成无限重启。这里兜住，把故障限制在这一次扫描内。
+		defer func() {
+			if e := recover(); e != nil {
+				log.Printf("[scan] 扫描协程 panic 已恢复，媒体库=%s: %v\n%s", lib.ID, e, debug.Stack())
+				if job, err := s.Store.GetScanJob("job-" + lib.ID); err == nil {
+					job.Status = "failed"
+					job.FinishedAt = model.NowMillis()
+					_ = s.Store.UpdateScanJob(job)
+				}
+			}
+		}()
 		_ = scanner.Scan(bg, lib, s.Store, cl, storages, rewrites, rate, searcher, nil)
 	}()
 	writeJSON(w, map[string]interface{}{"job_id": "job-" + lib.ID, "status": "running"})

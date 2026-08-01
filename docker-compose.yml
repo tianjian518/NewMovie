@@ -14,6 +14,15 @@ services:
       - VIDRIVE_ADMIN_PASS=请改成强密码
       # VIDRIVE_SCAN_RATE=2   # 全局默认扫描限速 req/s（风控友好）
     restart: unless-stopped
+    # 内存上限：ARM 小内存设备（NAS/树莓派）上给个护栏，
+    # 避免异常占用把整机拖垮；正常运行通常只占几十 MB。
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8096/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   # 同网络部署 OpenList 时，用容器名互访：http://openlist:5244
   # openlist:
