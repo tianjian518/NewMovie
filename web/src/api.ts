@@ -9,6 +9,9 @@ export function getToken(): string {
 export function setToken(t: string) {
   localStorage.setItem(TOKEN_KEY, t);
 }
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+}
 
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
@@ -19,6 +22,11 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (tok) headers["Authorization"] = "Bearer " + tok;
   const resp = await fetch(path, { ...opts, headers });
   if (!resp.ok) {
+    // 401 表示 token 失效，通知全局监听者（App 的 useEffect）退回登录页。
+    // 否则用户会卡在主界面却所有请求报错，体验如同白板。
+    if (resp.status === 401) {
+      window.dispatchEvent(new Event("newmovie:unauthorized"));
+    }
     const text = await resp.text();
     throw new Error(text || `HTTP ${resp.status}`);
   }

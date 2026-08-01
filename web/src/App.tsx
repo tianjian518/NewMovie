@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Routes, Route, Link, useNavigate } from "react-router-dom";
-import { api, getToken, setToken } from "./api";
+import { api, getToken, setToken, clearToken } from "./api";
 import type { MediaItem, ScanJob } from "./types";
 import Library from "./pages/Library";
 import Detail from "./pages/Detail";
@@ -8,20 +8,27 @@ import Player from "./pages/Player";
 import Settings from "./pages/Settings";
 import PosterCard from "./components/PosterCard";
 
-function Login() {
+// Login 通过 onLogin 回调把 token 交回给 App，触发重新渲染。
+// 只写 localStorage 是不够的 —— React 不会因为 localStorage 变化而重渲染，
+// 那样点了登录会「毫无反应」（其实已登录成功，必须手动刷新才进得去）。
+function Login({ onLogin }: { onLogin: (token: string) => void }) {
   const [u, setU] = useState("admin");
   const [p, setP] = useState("admin");
   const [err, setErr] = useState("");
-  const nav = useNavigate();
+  const [busy, setBusy] = useState(false);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (busy) return;
     setErr("");
+    setBusy(true);
     try {
       const r = await api.login(u, p);
-      setToken(r.token);
-      nav("/");
+      if (!r?.token) throw new Error("服务端未返回 token");
+      onLogin(r.token);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(e?.message || "登录失败，请检查用户名和密码");
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -31,7 +38,9 @@ function Login() {
         <input className="w-full bg-ink rounded p-2" placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
         <input type="password" className="w-full bg-ink rounded p-2" placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} />
         {err && <p className="text-red-400 text-sm">{err}</p>}
-        <button className="w-full bg-brand rounded p-2 font-semibold">登录</button>
+        <button disabled={busy} className="w-full bg-brand rounded p-2 font-semibold disabled:opacity-60">
+          {busy ? "登录中…" : "登录"}
+        </button>
       </form>
     </div>
   );
@@ -102,16 +111,49 @@ function LibraryItems() {
 }
 
 export default function App() {
-  const [token] = useState(getToken());
-  if (!token) return <Login />;
+  // token 必须是可更新的 state：登录成功后调用 setTok 才会重新渲染进主界面。
+  const [token, setTok] = useState(getToken());
+  const nav = useNavigate();
+
+  // token 失效（后端返回 401）时自动退回登录页，避免整站白板。
+  useEffect(() => {
+    const onUnauthorized = () => {
+      clearToken();
+      setTok("");
+    };
+    window.addEventListener("newmovie:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("newmovie:unauthorized", onUnauthorized);
+  }, []);
+
+  if (!token) {
+    return (
+      <Login
+        onLogin={(t) => {
+          setToken(t);
+          setTok(t);
+          nav("/", { replace: true });
+        }}
+      />
+    );
+  }
+
+  function logout() {
+    clearToken();
+    setTok("");
+    nav("/", { replace: true });
+  }
+
   return (
     <div className="min-h-screen flex">
-      <aside className="w-48 bg-panel p-4 space-y-2 shrink-0">
+      <aside className="w-48 bg-panel p-4 space-y-2 shrink-0 flex flex-col">
         <div className="text-xl font-bold mb-6">NewMovie</div>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/">媒体库</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/continue">继续观看</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/favorites">收藏</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/settings">设置</Link>
+        <button onClick={logout} className="mt-auto text-left px-3 py-2 rounded text-gray-400 hover:bg-card hover:text-gray-200">
+          退出登录
+        </button>
       </aside>
       <main className="flex-1 p-6 overflow-auto">
         <Routes>
