@@ -32,7 +32,7 @@ jobs:
         run: |
           TAGS="${{ secrets.DOCKERHUB_USERNAME }}/newmovie:latest"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME}"
+            VERSION="${GITHUB_REF_NAME#v}"   # 去掉前缀 v，得到 1.1.0（与手动推送的 1.0.0 约定一致）
             TAGS="${TAGS},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:${VERSION}"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
