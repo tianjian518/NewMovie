@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -45,13 +46,69 @@ type fsListReq struct {
 }
 
 type FsObj struct {
-	Name     string `json:"name"`
-	Size     int64  `json:"size"`
-	IsDir    bool   `json:"is_dir"`
-	Modified int64  `json:"modified"` // 秒级时间戳
-	Thumb    string `json:"thumb"`
-	Type     string `json:"type"`
-	Sign     string `json:"sign"`
+	Name     string    `json:"name"`
+	Size     FlexInt64 `json:"size"`
+	IsDir    bool      `json:"is_dir"`
+	Modified FlexInt64 `json:"modified"` // 秒级时间戳
+	Thumb    string    `json:"thumb"`
+	Type     string    `json:"type"`
+	Sign     string    `json:"sign"`
+}
+
+// FlexInt64 兼容 OpenList 系接口把数值字段（size / modified）有时传数字、
+// 有时传字符串（甚至 ISO 日期串）的不一致行为，反序列化时统一归一为 int64。
+// 解析不出时回退 0，绝不因单条脏数据让整次列表 / 测试连接失败。
+type FlexInt64 int64
+
+func (f *FlexInt64) UnmarshalJSON(b []byte) error {
+	*f = 0
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		return nil
+	}
+	// 数字：先试整型，再试浮点（如 1699... .0 或 1.5e3）
+	if s[0] == '-' || (s[0] >= '0' && s[0] <= '9') {
+		var n int64
+		if err := json.Unmarshal(b, &n); err == nil {
+			*f = FlexInt64(n)
+			return nil
+		}
+		var fl float64
+		if err := json.Unmarshal(b, &fl); err == nil {
+			*f = FlexInt64(int64(fl))
+			return nil
+		}
+	}
+	// 字符串：先去引号，再试整型 / 浮点
+	str := strings.Trim(strings.TrimSpace(s), `"`)
+	if str == "" {
+		return nil
+	}
+	if v, err := strconv.ParseInt(str, 10, 64); err == nil {
+		*f = FlexInt64(v)
+		return nil
+	}
+	if v, err := strconv.ParseFloat(str, 64); err == nil {
+		*f = FlexInt64(int64(v))
+		return nil
+	}
+	// ISO 日期串：转成 unix 秒
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, str); err == nil {
+			*f = FlexInt64(t.Unix())
+			return nil
+		}
+	}
+	return nil
+}
+
+func (f FlexInt64) MarshalJSON() ([]byte, error) {
+	return json.Marshal(int64(f))
 }
 
 type fsListResp struct {

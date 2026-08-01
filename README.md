@@ -36,6 +36,7 @@ NewMovie 的立场（详见 [`PLAN.md`](./PLAN.md)）：
 - **多架构镜像**：`linux/amd64` + `linux/arm64` + `linux/arm/v7`（树莓派等），NAS / ARM 设备通用。
 - **稳定性护栏**（1.1.1）：目录环 / 超深嵌套检测、全链路 panic 恢复、合并落盘（写入快 ~370 倍）、原子写库、优雅退出、监听重试与容器健康检查 —— 彻底根治小内存 ARM 设备上的**无限重启**。
 - **登录态修复**（1.1.3）：根因是 `App` 用 `useState(getToken())` 只在挂载时读一次 localStorage，登录成功后即便 token 已写入也无法重新渲染，表现为「点登录毫无反应、手动刷新才进得去」。改为 `onLogin` 回调 `setTok` 触发重渲染，并新增 `api` 在收到 `401` 时派发 `newmovie:unauthorized` 事件、`App` 监听后自动退回登录页并清 token —— 顺手解决了 token 失效后整站卡死的问题。
+- **OpenList 连接修复**（1.1.4）：部分 OpenList / AList（尤其 139cas 等 rebrand）把 `size` / `modified` 序列化成字符串，导致「测试连接」报 `cannot unmarshal string into ... modified of type int64`。新增 `FlexInt64` 类型兼容数字 / 字符串数字 / 浮点 / ISO 日期串，解析不出回退 0，不再因单条脏数据让整次列表或测试连接失败。
 
 ---
 
