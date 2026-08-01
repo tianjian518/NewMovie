@@ -1,0 +1,25 @@
+services:
+  vidrive:
+    # 把 yourname 换成你的 Docker Hub 用户名；多架构镜像自动匹配
+    image: tianjian518/newmovie:latest
+    container_name: vidrive
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./data:/data
+      # 若要用 STRM 模式，把 OpenList 落地的 strm 目录挂进来（只读）：
+      # - /volume1/docker/openlist/strm:/media/strm:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - VIDRIVE_ADMIN_PASS=请改成强密码
+      # VIDRIVE_SCAN_RATE=2   # 全局默认扫描限速 req/s（风控友好）
+    restart: unless-stopped
+
+  # 同网络部署 OpenList 时，用容器名互访：http://openlist:5244
+  # openlist:
+  #   image: xhofe/openlist:latest
+  #   volumes:
+  #     - ./openlist:/data
+  #   ports:
+  #     - "5244:5244"
+  #   restart: unless-stopped

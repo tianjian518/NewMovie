@@ -1,0 +1,9 @@
+.git
+node_modules
+web/node_modules
+data
+*.log
+.github
+README.md
+PLAN.md
+.DS_Store

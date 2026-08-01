@@ -1,0 +1,7 @@
+/node_modules
+/web/node_modules
+/cmd/server/dist/*
+!/cmd/server/dist/index.html
+/data
+*.exe
+*.test
