@@ -62,6 +62,41 @@ export interface PlayDecision {
   supports_range: boolean;
   headers: Record<string, string>;
   needs_transcode: boolean;
+  // 续播：上次看到的位置（秒），0 表示从头开始
+  resume_position: number;
+  resume_duration: number;
+  item_id: string;
+  title: string;
+  subtitle: string;
+}
+
+// 详情接口返回：条目 + 文件 + 每个文件的观看进度 + 是否已收藏
+export interface ItemDetail {
+  item: MediaItem;
+  files: MediaFile[];
+  progress: Record<string, { position: number; duration: number }>;
+  favored: boolean;
+}
+
+// 继续观看列表项（后端已聚合出条目信息）
+export interface ContinueRow {
+  id: string;
+  file_id: string;
+  position: number;
+  duration: number;
+  updated_at: number;
+  season_no: number;
+  episode_no: number;
+  file_name: string;
+  item?: MediaItem;
+}
+
+// 收藏列表项（后端已聚合出条目信息）
+export interface FavoriteRow {
+  id: string;
+  item_id: string;
+  kind: string;
+  item: MediaItem;
 }
 
 export interface ScanJob {

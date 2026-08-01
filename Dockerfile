@@ -28,7 +28,8 @@ RUN GOARM=$( [ "$TARGETARCH" = "arm" ] && echo 7 || echo "" ) && \
 
 # ---- 阶段 3：运行镜像（多架构） ----
 FROM alpine:3.20 AS run
-RUN apk add --no-cache ca-certificates tzdata wget
+# ffmpeg 用于 /api/play/remux 实时重封装（MKV 等容器转 MP4），让页内播放不再依赖外部播放器。
+RUN apk add --no-cache ca-certificates tzdata wget ffmpeg
 WORKDIR /app
 COPY --from=backend /out/newmovie /app/newmovie
 # 预建数据目录：未挂载卷时也能启动，避免因目录缺失反复失败重启。

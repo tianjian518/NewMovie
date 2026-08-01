@@ -5,6 +5,7 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"time"
 )
@@ -14,9 +15,14 @@ func HashPassword(pw string) string {
 	return sha256Hex("newmovie::" + pw)
 }
 
-// CheckPassword 校验密码（恒定比较避免计时攻击）。
+// CheckPassword 校验密码。
+//
+// 用 subtle.ConstantTimeCompare 而不是 `==`：Go 的字符串比较是短路的，
+// 前缀错得越早返回越快，攻击者可以据此逐字节把哈希试出来。
+// 注释以前写着「恒定比较」，实现却是 `==` —— 名不副实，这里补上。
 func CheckPassword(pw, hash string) bool {
-	return sha256Hex("newmovie::"+pw) == hash
+	got := sha256Hex("newmovie::" + pw)
+	return subtle.ConstantTimeCompare([]byte(got), []byte(hash)) == 1
 }
 
 // NewToken 生成随机会话 token。

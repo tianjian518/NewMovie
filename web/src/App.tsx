@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { Routes, Route, Link, useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Routes, Route, Link, useNavigate, useParams } from "react-router-dom";
 import { api, getToken, setToken, clearToken } from "./api";
-import type { MediaItem, ScanJob } from "./types";
+import type { MediaItem, ScanJob, ContinueRow, FavoriteRow } from "./types";
 import Library from "./pages/Library";
 import Detail from "./pages/Detail";
 import Player from "./pages/Player";
@@ -46,82 +46,234 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
+function fmtTime(sec: number): string {
+  if (!sec || sec < 0) return "0:00";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+// 空状态/错误态统一样式，省得每个页面各写一套。
+function Hint({ err, empty, onRetry }: { err?: string; empty?: string; onRetry?: () => void }) {
+  if (err) {
+    return (
+      <div className="text-sm">
+        <span className="text-red-400">加载失败：{err}</span>
+        {onRetry && <button onClick={onRetry} className="ml-3 bg-brand rounded px-2 py-0.5">重试</button>}
+      </div>
+    );
+  }
+  return <p className="text-gray-500 text-sm">{empty}</p>;
+}
+
 function ContinuePage() {
-  const [list, setList] = useState<any[]>([]);
-  useEffect(() => { api.listContinue().then(setList).catch(() => {}); }, []);
+  const [list, setList] = useState<ContinueRow[]>([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+  const load = () => {
+    setLoading(true); setErr("");
+    api.listContinue().then(setList).catch((e) => setErr(e?.message || "未知错误")).finally(() => setLoading(false));
+  };
+  useEffect(load, []);
+
   return (
     <div>
       <h2 className="text-xl font-bold mb-4">继续观看</h2>
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-        {list.map((r) => (
-          <Link key={r.id} to={"/play/" + r.file_id} className="bg-card rounded p-3">
-            <div>进度 {r.duration ? Math.round((r.position / r.duration) * 100) : 0}%</div>
-            <div className="text-sm text-gray-400">{r.position}s / {r.duration}s</div>
-          </Link>
-        ))}
-      </div>
+      {loading ? <p className="text-gray-400 text-sm">加载中…</p> :
+        list.length === 0 ? <Hint err={err} empty="还没有观看记录，去媒体库挑一部吧。" onRetry={load} /> : (
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            {list.map((r) => {
+              const pct = r.duration > 0 ? Math.min(100, Math.round((r.position / r.duration) * 100)) : 0;
+              const label = r.episode_no > 0
+                ? (r.season_no > 1 ? `S${r.season_no}E${r.episode_no}` : `第 ${r.episode_no} 集`)
+                : "";
+              return (
+                <Link key={r.id} to={"/play/" + r.file_id} className="block group">
+                  {r.item
+                    ? <PosterCard item={r.item} />
+                    : <div className="aspect-[2/3] bg-card rounded-lg flex items-center justify-center text-xs text-gray-500 p-2 text-center">{r.file_name}</div>}
+                  <div className="h-1 bg-white/10 rounded mt-1.5">
+                    <div className="h-full bg-brand rounded" style={{ width: pct + "%" }} />
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1 truncate">
+                    {label && <span className="text-brand mr-1">{label}</span>}
+                    {fmtTime(r.position)} / {fmtTime(r.duration)}
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        )}
     </div>
   );
 }
 
 function FavoritesPage() {
-  const [list, setList] = useState<any[]>([]);
-  useEffect(() => { api.listFavorites().then(setList).catch(() => {}); }, []);
-  return (
-    <div>
-      <h2 className="text-xl font-bold mb-4">收藏</h2>
-      <pre className="text-xs text-gray-400">{JSON.stringify(list, null, 2)}</pre>
-    </div>
-  );
-}
+  const [list, setList] = useState<FavoriteRow[]>([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+  const load = () => {
+    setLoading(true); setErr("");
+    api.listFavorites().then(setList).catch((e) => setErr(e?.message || "未知错误")).finally(() => setLoading(false));
+  };
+  useEffect(load, []);
 
-function LibraryItems() {
-  const id = window.location.pathname.split("/").pop() || "";
-  const [items, setItems] = useState<MediaItem[]>([]);
-  const [job, setJob] = useState<ScanJob | null>(null);
-
-  const load = () => api.libraryItems(id).then(setItems).catch(() => {});
-  useEffect(() => { load(); }, [id]);
-
-  // 挂载时若后台已有进行中的扫描（如「创建并扫描导入」自动发起的），自动轮询进度。
-  useEffect(() => {
-    let tick: any;
-    api.latestScanJob(id).then((j) => {
-      setJob(j);
-      if (j.status === "running") {
-        tick = setInterval(async () => {
-          const cur = await api.scanJob(j.id);
-          setJob(cur);
-          if (cur.status !== "running") { clearInterval(tick); load(); }
-        }, 1500);
-      }
-    }).catch(() => {});
-    return () => { if (tick) clearInterval(tick); };
-  }, [id]);
-
-  async function scan() {
-    const r = await api.scan(id);
-    const tick = setInterval(async () => {
-      const j = await api.scanJob(r.job_id);
-      setJob(j);
-      if (j.status !== "running") { clearInterval(tick); load(); }
-    }, 1500);
+  async function remove(itemId: string) {
+    try {
+      await api.removeFavorite(itemId);
+      setList((l) => l.filter((x) => x.item_id !== itemId));
+    } catch (e: any) {
+      setErr(e?.message || "取消收藏失败");
+    }
   }
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold">海报墙</h2>
-        <button onClick={scan} className="bg-brand rounded px-3 py-1 text-sm">扫描导入</button>
+      <h2 className="text-xl font-bold mb-4">收藏</h2>
+      {loading ? <p className="text-gray-400 text-sm">加载中…</p> :
+        list.length === 0 ? <Hint err={err} empty="还没有收藏。在详情页点「收藏」加进来。" onRetry={load} /> : (
+          <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-4">
+            {list.map((f) => (
+              <div key={f.id} className="relative group">
+                <Link to={"/item/" + f.item_id}><PosterCard item={f.item} /></Link>
+                <button
+                  title="取消收藏"
+                  onClick={() => remove(f.item_id)}
+                  className="absolute top-1 right-1 bg-black/70 hover:bg-red-600 rounded w-6 h-6 text-xs opacity-0 group-hover:opacity-100 transition"
+                >×</button>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
+const SORTS = [
+  { v: "title", label: "标题" },
+  { v: "year", label: "年份" },
+  { v: "rating", label: "评分" },
+  { v: "recent", label: "最近添加" },
+];
+
+function LibraryItems() {
+  const { id = "" } = useParams();
+  const [items, setItems] = useState<MediaItem[]>([]);
+  const [job, setJob] = useState<ScanJob | null>(null);
+  const [err, setErr] = useState("");
+  const [scanning, setScanning] = useState(false);
+  // 搜索 / 筛选 / 排序：库一大，纯海报墙就是一面砖墙，翻不动也找不到。
+  const [q, setQ] = useState("");
+  const [kind, setKind] = useState("");
+  const [sortBy, setSortBy] = useState("title");
+  // 所有轮询定时器统一挂 ref，组件卸载时一定清掉。
+  // 老实现在 scan() 里 setInterval 却没人管，用户点完扫描立刻切页，
+  // 定时器会一直在后台请求，还对着已卸载组件 setState。
+  const tickRef = useRef<any>(null);
+
+  const clearTick = () => { if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; } };
+
+  const load = useCallback(() => {
+    if (!id) return;
+    setErr("");
+    api.search({ q, kind, library: id, sort: sortBy })
+      .then(setItems)
+      .catch((e) => setErr(e?.message || "加载失败"));
+  }, [id, q, kind, sortBy]);
+
+  // 搜索输入做 300ms 防抖，别每敲一个字就打一次接口。
+  useEffect(() => {
+    const t = setTimeout(load, q ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [load, q]);
+
+  const poll = useCallback((jobId: string) => {
+    clearTick();
+    setScanning(true);
+    tickRef.current = setInterval(async () => {
+      try {
+        const cur = await api.scanJob(jobId);
+        setJob(cur);
+        if (cur.status !== "running") { clearTick(); setScanning(false); load(); }
+      } catch {
+        clearTick(); setScanning(false);
+      }
+    }, 1500);
+  }, [load]);
+
+  // 挂载时若后台已有进行中的扫描（如「创建并扫描导入」自动发起的），自动接管轮询。
+  useEffect(() => {
+    api.latestScanJob(id).then((j) => {
+      setJob(j);
+      if (j.status === "running") poll(j.id);
+    }).catch(() => {});
+    return clearTick; // 卸载时务必清理
+  }, [id, poll]);
+
+  async function scan() {
+    if (scanning) return; // 双保险：按钮已禁用，这里再挡一次连点
+    try {
+      const r = await api.scan(id);
+      poll(r.job_id);
+    } catch (e: any) {
+      // 后端对重复扫描回 409，属于预期内提示而非报错
+      setErr(e?.message?.includes("正在扫描") ? "该媒体库正在扫描中，请稍候" : (e?.message || "启动扫描失败"));
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <h2 className="text-xl font-bold mr-auto">海报墙</h2>
+        <input
+          className="bg-card rounded px-3 py-1 text-sm w-48 border border-white/10"
+          placeholder="搜索片名 / 简介"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-card rounded px-2 py-1 text-sm border border-white/10">
+          <option value="">全部</option>
+          <option value="movie">电影</option>
+          <option value="series">剧集</option>
+        </select>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="bg-card rounded px-2 py-1 text-sm border border-white/10">
+          {SORTS.map((s) => <option key={s.v} value={s.v}>按{s.label}</option>)}
+        </select>
+        <button
+          onClick={scan}
+          disabled={scanning}
+          className="bg-brand rounded px-3 py-1 text-sm disabled:opacity-50"
+        >
+          {scanning ? "扫描中…" : "扫描导入"}
+        </button>
       </div>
       {job && job.status === "running" && (
-        <div className="text-sm text-gray-400 mb-3">扫描中 {job.done}/{job.total}</div>
+        <div className="text-sm text-gray-400 mb-3">
+          扫描中 {job.done}/{job.total || "?"}
+          {job.total > 0 && (
+            <span className="inline-block align-middle ml-2 w-32 h-1 bg-white/10 rounded">
+              <span className="block h-full bg-brand rounded" style={{ width: Math.min(100, (job.done / job.total) * 100) + "%" }} />
+            </span>
+          )}
+        </div>
       )}
-      <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-4">
-        {items.map((it) => (
-          <Link key={it.id} to={"/item/" + it.id}><PosterCard item={it} /></Link>
-        ))}
-      </div>
+      {err && <p className="text-red-400 text-sm mb-3">{err}</p>}
+      {items.length === 0 ? (
+        <p className="text-gray-500 text-sm">
+          {q || kind ? "没有匹配的条目，换个关键词试试。" : "这个媒体库还是空的，点右上角「扫描导入」。"}
+        </p>
+      ) : (
+        <>
+          <div className="text-xs text-gray-500 mb-2">共 {items.length} 个条目</div>
+          <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-4">
+            {items.map((it) => (
+              <Link key={it.id} to={"/item/" + it.id}><PosterCard item={it} /></Link>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

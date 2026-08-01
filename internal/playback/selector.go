@@ -4,17 +4,20 @@
 // 纯标准库实现，可独立单测（见 selector_test.go）。
 package playback
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // Level 播放级别。
 type Level int
 
 const (
-	L0Direct  Level = iota // 302 直链（零服务端开销）
-	L1Proxy                // 代理转发（补防盗链 header）
-	L2Remux                // 重封装 -c copy（修正容器不兼容）
-	L3Transcode            // 真转码（资源黑洞，默认关）
-	L4External             // 唤起外部播放器
+	L0Direct    Level = iota // 302 直链（零服务端开销）
+	L1Proxy                  // 代理转发（补防盗链 header）
+	L2Remux                  // 重封装 -c copy（修正容器不兼容）
+	L3Transcode              // 真转码（资源黑洞，默认关）
+	L4External               // 唤起外部播放器
 )
 
 // Input 决策输入。
@@ -46,6 +49,20 @@ var (
 	nativeContainers = map[string]bool{"mp4": true, "webm": true, "mov": true}
 	nativeVideo      = map[string]bool{"h264": true, "avc": true, "vp9": true, "av1": true}
 	nativeAudio      = map[string]bool{"aac": true, "mp3": true, "opus": true}
+)
+
+// 可无损重封装进 MP4 的编码：容器不兼容但编码本身浏览器通用能解，
+// 用 ffmpeg -c copy 换个壳即可页内播放（见 L2Remux 与 /api/play/remux）。
+// 注意：hevc 不在此列——浏览器对 HEVC 支持不普遍（多数 Chrome 无硬解），
+// 强行复制进 MP4 会在无硬解设备上播不出来，反而比甩外部播放器更糟。
+var (
+	remuxVideo = map[string]bool{
+		"h264": true, "avc": true,
+		"vp9": true, "av1": true,
+	}
+	remuxAudio = map[string]bool{"aac": true, "mp3": true, "opus": true}
+	// 这些容器浏览器原生不支持，但编码可被 -c copy 塞进 MP4。
+	remuxContainers = map[string]bool{"mkv": true, "ts": true, "m2ts": true, "flv": true}
 )
 
 func norm(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -83,10 +100,10 @@ func Select(in Input) Decision {
 	}
 
 	// 非原生：先看是否只需修正容器（编码本身浏览器支持）→ L2 Remux
-	remuxable := nativeVideo[vc] && nativeAudio[ac] && c == "mkv"
+	remuxable := remuxVideo[vc] && remuxAudio[ac] && remuxContainers[c]
 	if remuxable {
-		return Decision{Level: L2Remux, Label: "重封装", Reason: "MKV 容器不兼容，编码可用，-c copy 重封装",
-			URL: pickURL(in), UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
+		return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4",
+			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
 	}
 
 	// 编码不支持：转码 或 外部播放器
@@ -104,6 +121,18 @@ func pickURL(in Input) string {
 		return in.RawURL
 	}
 	return in.DirectURL
+}
+
+// PickURL 导出给上层（handlers）取源地址，用于构造重封装链接。
+func PickURL(in Input) string { return pickURL(in) }
+
+// RemuxURL 把源直链转为 NewMovie 的实时重封装端点（ffmpeg -c copy → 分片 MP4）。
+// 浏览器拿不到 MKV 直链，必须经过这道转封装才能页内播放。
+func RemuxURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return "/api/play/remux?u=" + url.QueryEscape(raw)
 }
 
 // proxyPath 把直链转为 Vidrive 代理路径（前端统一请求本服务，由服务补 header）。

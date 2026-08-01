@@ -1,5 +1,8 @@
 // 后端 API 客户端。token 存 localStorage，所有请求自动带 Authorization。
-import type { Storage, Library, MediaItem, MediaFile, PlayDecision, ScanJob, PathRewrite } from "./types";
+import type {
+  Storage, Library, MediaItem, PlayDecision, ScanJob, PathRewrite,
+  ItemDetail, ContinueRow, FavoriteRow,
+} from "./types";
 
 const TOKEN_KEY = "vidrive_token";
 
@@ -68,11 +71,24 @@ export const api = {
 
   scanJob: (jobId: string) => req<ScanJob>("/api/scan/" + jobId),
   latestScanJob: (libId: string) => req<ScanJob>("/api/libraries/" + libId + "/scan"),
-  item: (id: string) => req<{ item: MediaItem; files: MediaFile[] }>("/api/items/" + id),
+  item: (id: string) => req<ItemDetail>("/api/items/" + id),
   rescrape: (id: string) =>
     req<{ ok: boolean }>("/api/items/" + id + "/rescrape", { method: "POST" }),
+  // 手动把条目绑定到指定 TMDB ID（自动匹配认错时的补救手段）
+  matchItem: (id: string, tmdb_id: number, kind: string) =>
+    req<{ ok: boolean; item: MediaItem }>("/api/items/" + id + "/match", {
+      method: "POST",
+      body: JSON.stringify({ tmdb_id, kind }),
+    }),
   play: (fileId: string) =>
     req<PlayDecision>("/api/items/" + fileId + "/play"),
+
+  // 全局搜索 / 筛选 / 排序
+  search: (p: { q?: string; kind?: string; library?: string; sort?: string }) => {
+    const qs = new URLSearchParams();
+    Object.entries(p).forEach(([k, v]) => { if (v) qs.set(k, v); });
+    return req<MediaItem[]>("/api/search?" + qs.toString());
+  },
 
   saveRecord: (fileId: string, position: number, duration: number) =>
     req<any>("/api/play/record", {
@@ -80,13 +96,15 @@ export const api = {
       body: JSON.stringify({ file_id: fileId, position, duration }),
     }),
 
-  listContinue: () => req<any[]>("/api/continue"),
-  listFavorites: () => req<any[]>("/api/favorites"),
+  listContinue: () => req<ContinueRow[]>("/api/continue"),
+  listFavorites: () => req<FavoriteRow[]>("/api/favorites"),
   addFavorite: (itemId: string, kind: string) =>
     req<any>("/api/favorites", {
       method: "POST",
       body: JSON.stringify({ item_id: itemId, kind }),
     }),
+  removeFavorite: (itemId: string) =>
+    req<{ ok: boolean }>("/api/favorites/" + itemId, { method: "DELETE" }),
 
   listRewrites: () => req<PathRewrite[]>("/api/rewrites"),
   createRewrite: (r: { pattern: string; replacement: string; priority: number }) =>

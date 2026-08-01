@@ -25,8 +25,16 @@ var yearRe = regexp.MustCompile(`(19|20)\d{2}`)
 
 // 季集形态
 var seasonEpRe = regexp.MustCompile(`(?i)S(\d{1,2})[.\s]*E(\d{1,3})`)
-var epRe = regexp.MustCompile(`(?i)(?:EP|第|E|第)(\d{1,3})(?:集|话|EP|E)?`)
-var chineseEPRe = regexp.MustCompile(`第\s*(\d{1,3})\s*集`)
+
+// chineseEPRe 中文集数，**必须**带「集/话/話/期」量词。
+// 不能只认 `第(\d+)`：「第9区」「第一滴血4」这类片名会被当成第 9 集/第 4 集，
+// 于是电影被塞进剧集聚合逻辑，海报、详情、条目 ID 全部错乱。
+var chineseEPRe = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話期]`)
+
+// epRe 英文集数 EP03 / E07。E 前后都要求 ASCII 词边界，
+// 否则 "Se7en" 里的 `e7` 会被识别成第 7 集。
+var epRe = regexp.MustCompile(`(?i)\bEP?\s*(\d{1,3})\b`)
+
 var bracketEPRe = regexp.MustCompile(`\[(\d{1,3})\]`)
 
 // 季目录名：Season 1 / S01 / 第一季 / 第 2 季 / 特别篇 等，这类目录不含剧名，
@@ -208,5 +216,7 @@ func Parse(name string) Result {
 	return r
 }
 
-// epMarkerRe 标题中残留的季集标记（S01E05 / 第12集 / EP03 / [01]）。
-var epMarkerRe = regexp.MustCompile(`(?i)S\d{1,2}\s*E\d{1,3}|第\s*\d{1,3}\s*[集话話期]|\bEP\s*\d{1,3}\b|\[\d{1,3}\]`)
+// epMarkerRe 标题中残留的季集标记（S01E05 / 第12集 / EP03 / E07 / [01]）。
+// 与 epRe 保持一致：单字母 E 形态也要能被剥掉，否则「漫长的季节 E07」
+// 会带着 E07 去搜 TMDB，必然搜不到。
+var epMarkerRe = regexp.MustCompile(`(?i)S\d{1,2}\s*E\d{1,3}|第\s*\d{1,3}\s*[集话話期]|\bEP?\s*\d{1,3}\b|\[\d{1,3}\]`)

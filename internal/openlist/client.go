@@ -268,8 +268,21 @@ func (c *Client) do(api string, body []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	// 加读取上限：目录列表接口的响应大小由对端决定，一个塞了几十万文件的
+	// 目录（或一台被替换掉的恶意 OpenList）能直接把内存吃光。
+	// 32MB 足够放下任何正常的 fs/list 响应。
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) >= maxRespBytes {
+		return nil, fmt.Errorf("openlist %s: 响应超过 %dMB 上限，疑似目录过大或对端异常", api, maxRespBytes>>20)
+	}
+	return b, nil
 }
+
+// maxRespBytes 单次 API 响应最大读取字节数。
+const maxRespBytes int64 = 32 << 20
 
 // ---- 签名 ----
 

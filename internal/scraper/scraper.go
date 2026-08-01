@@ -160,10 +160,13 @@ func Scrape(ctx context.Context, item model.MediaItem, lib model.Library, st sto
 	} else if tm != nil && tm.Title != "" {
 		item.Title = tm.Title
 	}
+	// 年份优先级必须和标题一致：NFO/手动锁定 > 文件名解析 > TMDB。
+	// 老实现让 TMDB 无条件覆盖年份，结果同名不同年的作品（如「无间道 2002」
+	// 匹配到「无间道风云 2006」）会把年份改掉；而条目 ID 是 libID|title|year
+	// 算出来的，年份一变，下次扫描就多出一个重复条目。
 	if year != 0 {
 		item.Year = year
-	}
-	if tm != nil && tm.Year != 0 {
+	} else if item.Year == 0 && tm != nil && tm.Year != 0 {
 		item.Year = tm.Year
 	}
 	if overview != "" {

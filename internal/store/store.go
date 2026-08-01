@@ -10,6 +10,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,7 @@ type Store interface {
 
 	SaveFavorite(f model.Favorite) error
 	ListFavorites(userID string) ([]model.Favorite, error)
+	DeleteFavorite(userID, itemID string, kind model.FavoriteKind) error
 
 	SaveScanJob(j model.ScanJob) error
 	GetScanJob(id string) (model.ScanJob, error)
@@ -87,6 +90,16 @@ type db struct {
 	Users     []model.User      `json:"users"`
 	tokens    map[string]string // token -> userID
 	Settings  map[string]string `json:"settings,omitempty"`
+
+	// ---- 内存索引（不持久化）----
+	// 切片才是数据本体（JSON 数组），索引只是加速结构，加载/删除后重建。
+	//
+	// 为什么必须有：入库路径上每次 SaveMediaFile / GetMediaItem 都要线性扫一遍
+	// 全量切片。一个 5 万文件的库，扫描过程就是 5 万 × 5 万 = 25 亿次比较，
+	// 在 NAS/树莓派这类弱 CPU 上足以让「扫描」看起来永远卡在 30%。
+	itemIdx    map[string]int // item.ID -> 下标
+	itemKeyIdx map[string]int // libID|title|year -> 下标（标题去重用）
+	fileIdx    map[string]int // file.ID -> 下标
 }
 
 // NewJSONStore 打开（或创建）JSON 存储文件。
@@ -95,7 +108,51 @@ func NewJSONStore(path string) (Store, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, d) // 损坏则从头来，不致命
 	}
+	d.reindex()
 	return d, nil
+}
+
+// itemKey 标题去重键。
+func itemKey(libID, title string, year int) string {
+	return libID + "\x00" + title + "\x00" + strconv.Itoa(year)
+}
+
+// reindex 重建全部内存索引（调用方持有 d.mu，或在构造期独占）。
+func (d *db) reindex() {
+	d.itemIdx = make(map[string]int, len(d.Items))
+	d.itemKeyIdx = make(map[string]int, len(d.Items))
+	d.fileIdx = make(map[string]int, len(d.Files))
+	for i, x := range d.Items {
+		d.itemIdx[x.ID] = i
+		d.itemKeyIdx[itemKey(x.LibraryID, x.Title, x.Year)] = i
+	}
+	for i, x := range d.Files {
+		d.fileIdx[x.ID] = i
+	}
+}
+
+// putItemAt 就地替换条目并同步索引（标题可能被刮削改写，旧键要清掉）。
+func (d *db) putItemAt(i int, m model.MediaItem) {
+	old := d.Items[i]
+	if oldKey := itemKey(old.LibraryID, old.Title, old.Year); oldKey != itemKey(m.LibraryID, m.Title, m.Year) {
+		if j, ok := d.itemKeyIdx[oldKey]; ok && j == i {
+			delete(d.itemKeyIdx, oldKey)
+		}
+	}
+	if old.ID != m.ID {
+		delete(d.itemIdx, old.ID)
+	}
+	d.Items[i] = m
+	d.itemIdx[m.ID] = i
+	d.itemKeyIdx[itemKey(m.LibraryID, m.Title, m.Year)] = i
+}
+
+// appendItem 追加条目并登记索引。
+func (d *db) appendItem(m model.MediaItem) {
+	d.Items = append(d.Items, m)
+	i := len(d.Items) - 1
+	d.itemIdx[m.ID] = i
+	d.itemKeyIdx[itemKey(m.LibraryID, m.Title, m.Year)] = i
 }
 
 // flushDebounce 是合并落盘的等待窗口。
@@ -253,15 +310,38 @@ func (d *db) DeleteLibrary(id string) error {
 		return os.ErrNotExist
 	}
 	d.Libraries = out
+
+	// 级联清理：老实现只删库记录，条目和文件全留在 JSON 里变成孤儿——
+	// 既撑大存储文件、拖慢每一次线性扫描，删库重建后还可能被旧条目干扰。
+	items := d.Items[:0]
+	dropped := map[string]bool{}
+	for _, x := range d.Items {
+		if x.LibraryID == id {
+			dropped[x.ID] = true
+			continue
+		}
+		items = append(items, x)
+	}
+	d.Items = items
+	files := d.Files[:0]
+	for _, f := range d.Files {
+		if dropped[f.ItemID] {
+			continue
+		}
+		files = append(files, f)
+	}
+	d.Files = files
+	d.reindex()
 	return d.flush()
 }
 
 func (d *db) SaveMediaItem(m model.MediaItem) error {
 	d.mu.Lock(); defer d.mu.Unlock()
-	for i, x := range d.Items {
-		if x.ID == m.ID { d.Items[i] = m; return d.flush() }
+	if i, ok := d.itemIdx[m.ID]; ok {
+		d.putItemAt(i, m)
+		return d.flush()
 	}
-	d.Items = append(d.Items, m)
+	d.appendItem(m)
 	return d.flush()
 }
 
@@ -272,9 +352,20 @@ func (d *db) SaveMediaItem(m model.MediaItem) error {
 // 表现为海报墙上同一部剧出现两个方块，其中一个永远没有海报。
 func (d *db) UpsertMediaItemByTitle(m model.MediaItem) error {
 	d.mu.Lock(); defer d.mu.Unlock()
-	for i, x := range d.Items {
-		sameID := m.ID != "" && x.ID == m.ID
-		if sameID || (x.Title == m.Title && x.Year == m.Year && x.LibraryID == m.LibraryID) {
+	i, hit := -1, false
+	if m.ID != "" {
+		if j, ok := d.itemIdx[m.ID]; ok {
+			i, hit = j, true
+		}
+	}
+	if !hit {
+		if j, ok := d.itemKeyIdx[itemKey(m.LibraryID, m.Title, m.Year)]; ok {
+			i, hit = j, true
+		}
+	}
+	if hit {
+		x := d.Items[i]
+		{
 			// 保留更完整的元数据（本地图路径优先保留已存在的）
 			if m.TMDBID != 0 { x.TMDBID = m.TMDBID }
 			if m.Overview != "" { x.Overview = m.Overview }
@@ -289,11 +380,11 @@ func (d *db) UpsertMediaItemByTitle(m model.MediaItem) error {
 				x.BackdropPath = m.BackdropPath
 				x.BackdropStorageID = m.BackdropStorageID
 			}
-			d.Items[i] = x
-			return d.flush()
 		}
+		d.putItemAt(i, x)
+		return d.flush()
 	}
-	d.Items = append(d.Items, m)
+	d.appendItem(m)
 	return d.flush()
 }
 
@@ -308,18 +399,20 @@ func (d *db) ListMediaItems(libID string) ([]model.MediaItem, error) {
 
 func (d *db) GetMediaItem(id string) (model.MediaItem, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
-	for _, x := range d.Items {
-		if x.ID == id { return x, nil }
+	if i, ok := d.itemIdx[id]; ok {
+		return d.Items[i], nil
 	}
 	return model.MediaItem{}, os.ErrNotExist
 }
 
 func (d *db) SaveMediaFile(f model.MediaFile) error {
 	d.mu.Lock(); defer d.mu.Unlock()
-	for i, x := range d.Files {
-		if x.ID == f.ID { d.Files[i] = f; return d.flush() }
+	if i, ok := d.fileIdx[f.ID]; ok {
+		d.Files[i] = f
+		return d.flush()
 	}
 	d.Files = append(d.Files, f)
+	d.fileIdx[f.ID] = len(d.Files) - 1
 	return d.flush()
 }
 
@@ -334,8 +427,8 @@ func (d *db) ListMediaFiles(itemID string) ([]model.MediaFile, error) {
 
 func (d *db) GetMediaFile(id string) (model.MediaFile, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
-	for _, x := range d.Files {
-		if x.ID == id { return x, nil }
+	if i, ok := d.fileIdx[id]; ok {
+		return d.Files[i], nil
 	}
 	return model.MediaFile{}, os.ErrNotExist
 }
@@ -384,7 +477,8 @@ func (d *db) GetPlayRecord(userID, fileID string) (model.PlayRecord, error) {
 	return model.PlayRecord{}, os.ErrNotExist
 }
 
-// ListContinue 返回有进度但未看完的播放记录（继续观看）。
+// ListContinue 返回有进度但未看完的播放记录（继续观看），按最近观看倒序。
+// 不排序的话列表顺序等于写入顺序，最近看的那部反而排在最后，很反直觉。
 func (d *db) ListContinue(userID string) ([]model.PlayRecord, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
 	out := []model.PlayRecord{}
@@ -393,6 +487,7 @@ func (d *db) ListContinue(userID string) ([]model.PlayRecord, error) {
 			out = append(out, x)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out, nil
 }
 
@@ -414,6 +509,26 @@ func (d *db) ListFavorites(userID string) ([]model.Favorite, error) {
 		if x.UserID == userID { out = append(out, x) }
 	}
 	return out, nil
+}
+
+// DeleteFavorite 取消收藏。kind 为空表示删掉该条目下所有类型的收藏。
+// 以前只有「加」没有「取消」，收藏了就再也去不掉，只能手改 JSON。
+func (d *db) DeleteFavorite(userID, itemID string, kind model.FavoriteKind) error {
+	d.mu.Lock(); defer d.mu.Unlock()
+	out := d.Favorites[:0]
+	found := false
+	for _, x := range d.Favorites {
+		if x.UserID == userID && x.ItemID == itemID && (kind == "" || x.Kind == kind) {
+			found = true
+			continue
+		}
+		out = append(out, x)
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	d.Favorites = out
+	return d.flush()
 }
 
 func (d *db) SaveScanJob(j model.ScanJob) error {
