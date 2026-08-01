@@ -27,7 +27,13 @@ NewMovie 的立场（详见 [`PLAN.md`](./PLAN.md)）：
 - **路径重写规则**：存量 strm 里写死 `http://localhost:5244/...`？一条正则搞定，不必重生成几万个文件。
 - **风控友好**：令牌桶限速（默认 2 req/s）、增量扫描、指数退避、`refresh=false` 复用缓存。
 - **海报墙 + 详情 + 播放进度 + 继续观看 + 收藏**：Emby 深色紧凑 + 大图海报墙。
-- **多架构镜像**：`linux/amd64` + `linux/arm64`，NAS / ARM 设备通用。
+- **刮削元数据更准**：
+  - **NFO 优先**：同目录 `.nfo`（movie / tvshow / episodedetails）给出 tmdb id、标题、年份、简介、远程图。
+  - **剧集 `tvshow.nfo` 递归父目录**：系列级 `tvshow.nfo` / `poster.jpg` / `fanart.jpg` 不在单集同目录、而在剧集根目录时，自动沿父目录向上查找（优先级高于单集 nfo）。
+  - **`.vidrive.json` 手动锁定**：同目录或父目录放一个 `{"tmdb_id":27205,"type":"movie","title":"...","year":2010}`，手动锁定的 TMDB-ID / 标题 / 类型优先级最高，专治识别错乱。
+  - **本地图代理 + 服务端缓存**：同目录 `poster.jpg` / `fanart.jpg` 与 NFO 远程图统一走服务端代理，并落磁盘缓存（命中直出、支持 Range），规避直链过期、减少回源。
+  - **`.cas` 资源支持**：139cas（OpenList rebrand）的 `.cas` 指针文件按 strm 同类处理并归一化解析。
+- **多架构镜像**：`linux/amd64` + `linux/arm64` + `linux/arm/v7`（树莓派等），NAS / ARM 设备通用。
 
 ---
 

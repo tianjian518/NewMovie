@@ -17,13 +17,9 @@ import (
 // fakeOpenList 实现一个最小 OpenList 兼容服务：/api/fs/list、/api/fs/get、/raw。
 // 用于在不依赖真实 OpenList / 外网的情况下跑通「扫描 → NFO → 同目录图 → 刮削」整链。
 // 返回 server 与 nfoReads 计数器，用于验证增量缓存（重复扫描不应再读 NFO）。
-func fakeOpenList(t *testing.T) (*httptest.Server, *int) {
+// files 为「内部路径 -> 内容」映射；缺失路径的 /raw 返回 404（贴近真实 OpenList）。
+func fakeOpenList(t *testing.T, files map[string]string) (*httptest.Server, *int) {
 	t.Helper()
-	files := map[string]string{
-		"/movies/盗梦空间.2010.1080p.mkv":            "VIDEO",
-		"/movies/盗梦空间.2010.1080p.nfo":            `<movie><uniqueid type="tmdb">27205</uniqueid><thumb>https://nfo/p.jpg</thumb></movie>`,
-		"/movies/poster.jpg":                         "IMG",
-	}
 	nfoReads := 0
 
 	var base string
@@ -44,17 +40,32 @@ func fakeOpenList(t *testing.T) (*httptest.Server, *int) {
 				IsDir    bool   `json:"is_dir"`
 				Modified int64  `json:"modified"`
 			}
+			seen := map[string]bool{}
 			var content []obj
+			// 仅考虑「真正位于本目录之下」的文件：严格前缀 prefix+"/"，再取相对路径。
+			base := prefix
+			if !strings.HasSuffix(base, "/") {
+				base += "/"
+			}
 			for f := range files {
-				rest := strings.TrimPrefix(f, prefix)
-				if !strings.HasPrefix(rest, "/") {
+				if !strings.HasPrefix(f, base) {
 					continue
 				}
-				child := strings.TrimPrefix(rest, "/")
-				if strings.Contains(child, "/") {
-					continue // 非直接子项
+				rest := strings.TrimPrefix(f, base)
+				if rest == "" {
+					continue
 				}
-				content = append(content, obj{Name: child, Size: 1, IsDir: false, Modified: 1})
+				if idx := strings.Index(rest, "/"); idx >= 0 {
+					// 含 "/" 说明还有子目录，合成目录项
+					dirName := rest[:idx]
+					if !seen[dirName] {
+						seen[dirName] = true
+						content = append(content, obj{Name: dirName, Size: 1, IsDir: true, Modified: 1})
+					}
+				} else if !seen[rest] {
+					seen[rest] = true
+					content = append(content, obj{Name: rest, Size: 1, IsDir: false, Modified: 1})
+				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"code": 200, "message": "",
@@ -72,11 +83,16 @@ func fakeOpenList(t *testing.T) (*httptest.Server, *int) {
 			})
 		case r.URL.Path == "/raw":
 			f := r.URL.Query().Get("file")
+			data, ok := files[f]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if strings.HasSuffix(f, ".nfo") {
 				nfoReads++
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
-			_, _ = w.Write([]byte(files[f]))
+			_, _ = w.Write([]byte(data))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -86,7 +102,11 @@ func fakeOpenList(t *testing.T) (*httptest.Server, *int) {
 }
 
 func TestScan_NFOAndLocalPoster(t *testing.T) {
-	srv, _ := fakeOpenList(t)
+	srv, _ := fakeOpenList(t, map[string]string{
+		"/movies/盗梦空间.2010.1080p.mkv": "VIDEO",
+		"/movies/盗梦空间.2010.1080p.nfo": `<movie><uniqueid type="tmdb">27205</uniqueid><thumb>https://nfo/p.jpg</thumb></movie>`,
+		"/movies/poster.jpg":              "IMG",
+	})
 	defer srv.Close()
 
 	st, err := store.NewJSONStore(t.TempDir() + "/v.json")
@@ -129,7 +149,11 @@ func TestScan_NFOAndLocalPoster(t *testing.T) {
 
 // 验证增量缓存：第二次扫描不应再读 NFO / 再打 TMDB（已刮削的条目直接跳过）。
 func TestScan_IncrementalSkipsRescraped(t *testing.T) {
-	srv, nfoReads := fakeOpenList(t)
+	srv, nfoReads := fakeOpenList(t, map[string]string{
+		"/movies/盗梦空间.2010.1080p.mkv": "VIDEO",
+		"/movies/盗梦空间.2010.1080p.nfo": `<movie><uniqueid type="tmdb">27205</uniqueid><thumb>https://nfo/p.jpg</thumb></movie>`,
+		"/movies/poster.jpg":              "IMG",
+	})
 	defer srv.Close()
 
 	st, err := store.NewJSONStore(t.TempDir() + "/v2.json")
@@ -151,5 +175,104 @@ func TestScan_IncrementalSkipsRescraped(t *testing.T) {
 	}
 	if *nfoReads != 1 {
 		t.Errorf("scan2 不应再读 NFO，reads = %d, want 1（增量缓存失效）", *nfoReads)
+	}
+}
+
+// 验证 .vidrive.json 手动锁定：同目录 .vidrive.json 锁定的 tmdb_id/title 高于一切。
+func TestScan_VidriveJSONLock(t *testing.T) {
+	srv, _ := fakeOpenList(t, map[string]string{
+		"/movies/某片.mkv": "VIDEO",
+		// NFO 故意给错 id，验证手动锁优先
+		"/movies/某片.nfo":       `<movie><uniqueid type="tmdb">1</uniqueid><title>错误标题</title></movie>`,
+		"/movies/.vidrive.json": `{"tmdb_id":27205,"title":"正确标题","year":2010,"type":"movie"}`,
+	})
+	defer srv.Close()
+
+	st, _ := store.NewJSONStore(t.TempDir() + "/v3.json")
+	lib := model.Library{ID: "lib3", Name: "电影", Mode: model.ModeNative, StorageID: "st1", RootPath: "/movies"}
+	client := &openlist.Client{BaseURL: srv.URL, Token: "t"}
+
+	if err := Scan(context.Background(), lib, st, client, nil, nil, 50, nil, nil); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := st.ListMediaItems("lib3")
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	it := items[0]
+	if it.TMDBID != 27205 {
+		t.Errorf("tmdb id = %d, want 27205（.vidrive.json 锁应覆盖 NFO 的 1）", it.TMDBID)
+	}
+	if it.Title != "正确标题" {
+		t.Errorf("title = %q, want 正确标题", it.Title)
+	}
+	if it.Year != 2010 {
+		t.Errorf("year = %d, want 2010", it.Year)
+	}
+}
+
+// 验证剧集 tvshow.nfo / 系列海报 在父目录（剧集根目录）时的递归查找。
+func TestScan_TVShowNFORecursive(t *testing.T) {
+	srv, _ := fakeOpenList(t, map[string]string{
+		"/tv/Show/tvshow.nfo":                       `<tvshow><uniqueid type="tmdb">1399</uniqueid><title>权力的游戏</title></tvshow>`,
+		"/tv/Show/poster.jpg":                       "IMG",
+		"/tv/Show/S01/权力的游戏.S01E01.mkv":        "VIDEO",
+		"/tv/Show/S01/权力的游戏.S01E01.nfo":        `<episodedetails><title>凛冬的寒风</title></episodedetails>`,
+	})
+	defer srv.Close()
+
+	st, _ := store.NewJSONStore(t.TempDir() + "/v4.json")
+	lib := model.Library{ID: "lib4", Name: "剧集", Mode: model.ModeNative, StorageID: "st1", RootPath: "/tv"}
+	client := &openlist.Client{BaseURL: srv.URL, Token: "t"}
+
+	if err := Scan(context.Background(), lib, st, client, nil, nil, 50, nil, nil); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := st.ListMediaItems("lib4")
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	it := items[0]
+	if it.Kind != model.KindSeries {
+		t.Errorf("kind = %q, want series", it.Kind)
+	}
+	if it.TMDBID != 1399 {
+		t.Errorf("tmdb id = %d, want 1399（来自父目录 tvshow.nfo）", it.TMDBID)
+	}
+	if it.Title != "权力的游戏" {
+		t.Errorf("title = %q, want 权力的游戏", it.Title)
+	}
+	if it.PosterPath != "/tv/Show/poster.jpg" {
+		t.Errorf("poster_path = %q, want /tv/Show/poster.jpg（父目录系列海报）", it.PosterPath)
+	}
+}
+
+// 验证 .cas（139cas 指针文件）按 strm 同类处理并正确解析。
+func TestScan_CasStrm(t *testing.T) {
+	srv, _ := fakeOpenList(t, map[string]string{
+		"/movies/某片.cas": "/movies/某片.mkv", // .cas 内容为内部路径（139cas 风格）
+	})
+	defer srv.Close()
+
+	st, _ := store.NewJSONStore(t.TempDir() + "/v5.json")
+	lib := model.Library{ID: "lib5", Name: "cas", Mode: model.ModeMixed, StorageID: "st1", RootPath: "/movies"}
+	client := &openlist.Client{BaseURL: srv.URL, Token: "t"}
+
+	if err := Scan(context.Background(), lib, st, client, nil, nil, 50, nil, nil); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := st.ListMediaItems("lib5")
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	files, _ := st.ListMediaFiles(items[0].ID)
+	if len(files) != 1 {
+		t.Fatalf("files = %d, want 1", len(files))
+	}
+	if files[0].Source != model.SrcStrm {
+		t.Errorf("source = %q, want strm（.cas 应视作 strm）", files[0].Source)
+	}
+	if files[0].Path != "/movies/某片.mkv" {
+		t.Errorf("path = %q, want /movies/某片.mkv（.cas 内容解析）", files[0].Path)
 	}
 }

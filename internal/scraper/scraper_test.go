@@ -101,7 +101,7 @@ func TestScrape_LocalImageWins(t *testing.T) {
 	reader := stubReader{text: `<movie><uniqueid type="tmdb">1</uniqueid><thumb>https://nfo/poster.jpg</thumb></movie>`}
 	searcher := stubSearcher{meta: &tmdb.Meta{PosterPath: "/tmdb.jpg", Rating: 8.5}}
 
-	err := Scrape(context.Background(), item, lib, st, reader, searcher, "dir/m.nfo", "dir/poster.jpg", "")
+	err := Scrape(context.Background(), item, lib, st, reader, searcher, "dir/m.nfo", "dir/poster.jpg", "", nil)
 	if err != nil {
 		t.Fatalf("scrape: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestScrape_NFOImageOverTMDB(t *testing.T) {
 	reader := stubReader{text: `<movie><uniqueid type="tmdb">2</uniqueid><thumb>https://nfo/p.jpg</thumb></movie>`}
 	searcher := stubSearcher{meta: &tmdb.Meta{PosterPath: "/tmdb.jpg"}}
 
-	if err := Scrape(context.Background(), item, lib, st, reader, searcher, "dir/m.nfo", "", ""); err != nil {
+	if err := Scrape(context.Background(), item, lib, st, reader, searcher, "dir/m.nfo", "", "", nil); err != nil {
 		t.Fatalf("scrape: %v", err)
 	}
 	got, _ := st.GetMediaItem("m-2")
@@ -148,7 +148,7 @@ func TestScrape_TMDBFallback(t *testing.T) {
 		TMDBID: 99, Title: "官方标题", Year: 2021, Overview: "简介", Rating: 7.0, PosterPath: "/abc.jpg",
 	}}
 
-	if err := Scrape(context.Background(), item, lib, st, reader, searcher, "", "", ""); err != nil {
+	if err := Scrape(context.Background(), item, lib, st, reader, searcher, "", "", "", nil); err != nil {
 		t.Fatalf("scrape: %v", err)
 	}
 	got, _ := st.GetMediaItem("m-3")
@@ -173,7 +173,7 @@ func TestScrape_NoTMDBKey(t *testing.T) {
 	lib := model.Library{ID: "lib1", StorageID: "st1"}
 	reader := stubReader{err: os.ErrNotExist}
 
-	if err := Scrape(context.Background(), item, lib, st, reader, nil, "", "", ""); err != nil {
+	if err := Scrape(context.Background(), item, lib, st, reader, nil, "", "", "", nil); err != nil {
 		t.Fatalf("scrape: %v", err)
 	}
 	got, _ := st.GetMediaItem("m-4")
@@ -182,5 +182,50 @@ func TestScrape_NoTMDBKey(t *testing.T) {
 	}
 	if got.Year != 1999 {
 		t.Errorf("year = %d", got.Year)
+	}
+}
+
+// 用例：.vidrive.json 手动锁定（ManualMeta）优先级高于 NFO 与 TMDB。
+func TestScrape_ManualLockWins(t *testing.T) {
+	st := newStore(t)
+	item := model.MediaItem{ID: "m-5", LibraryID: "lib1", Kind: model.KindMovie, Title: "原始"}
+	lib := model.Library{ID: "lib1", StorageID: "st1"}
+	reader := stubReader{text: `<movie><uniqueid type="tmdb">1</uniqueid><thumb>https://nfo/p.jpg</thumb><title>NFO标题</title></movie>`}
+	searcher := stubSearcher{meta: &tmdb.Meta{TMDBID: 999, Title: "TMDB标题", PosterPath: "/tmdb.jpg", Rating: 9.0}}
+	manual := &ManualMeta{TMDBID: 27205, Title: "锁定标题", Year: 2010}
+
+	if err := Scrape(context.Background(), item, lib, st, reader, searcher, "dir/m.nfo", "", "", manual); err != nil {
+		t.Fatalf("scrape: %v", err)
+	}
+	got, _ := st.GetMediaItem("m-5")
+	if got.TMDBID != 27205 {
+		t.Errorf("tmdb id = %d, want 27205 (manual lock 应覆盖 NFO/TMDB)", got.TMDBID)
+	}
+	if got.Title != "锁定标题" {
+		t.Errorf("title = %q, want 锁定标题", got.Title)
+	}
+	if got.Year != 2010 {
+		t.Errorf("year = %d, want 2010", got.Year)
+	}
+	// 即便锁定了 id，TMDB 仍可按 id 拉到 rating 兜底
+	if got.Rating != 9.0 {
+		t.Errorf("rating = %v, want 9.0 (TMDB 按锁定 id 补全)", got.Rating)
+	}
+}
+
+// 用例：ManualMeta 可强制条目类型（movie <-> tv）。
+func TestScrape_ManualKindOverride(t *testing.T) {
+	st := newStore(t)
+	item := model.MediaItem{ID: "m-6", LibraryID: "lib1", Kind: model.KindMovie, Title: "剧集X"}
+	lib := model.Library{ID: "lib1", StorageID: "st1"}
+	searcher := stubSearcher{meta: &tmdb.Meta{TMDBID: 7, Title: "剧集X官方"}}
+	manual := &ManualMeta{Kind: model.KindSeries, TMDBID: 7}
+
+	if err := Scrape(context.Background(), item, lib, st, nil, searcher, "", "", "", manual); err != nil {
+		t.Fatalf("scrape: %v", err)
+	}
+	got, _ := st.GetMediaItem("m-6")
+	if got.Kind != model.KindSeries {
+		t.Errorf("kind = %q, want series (manual lock 应覆盖)", got.Kind)
 	}
 }

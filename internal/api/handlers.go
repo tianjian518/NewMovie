@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"newmovie/internal/auth"
@@ -86,7 +89,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	// 免鉴权
 	switch {
 	case p == "api/health":
-		writeJSON(w, map[string]interface{}{"ok": true, "version": "1.0.0", "name": "NewMovie"})
+		writeJSON(w, map[string]interface{}{"ok": true, "version": "1.1.0", "name": "NewMovie"})
 		return
 	case p == "api/login" && r.Method == http.MethodPost:
 		s.login(w, r)
@@ -506,7 +509,8 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 }
 
 // serveItemImage 经 OpenList 代理同目录本地图（poster.jpg / fanart.jpg）。
-// 这些图的直链会过期，故不把直链交给前端，而是每次由服务端代理，支持 Range。
+// 这些图的直链会过期，故不把直链交给前端，而是每次由服务端代理；并落本地缓存，
+// 命中缓存直接返回，避免重复回源（服务端图片缓存层）。
 func (s *Server) serveItemImage(w http.ResponseWriter, r *http.Request, id, kind string) {
 	item, err := s.Store.GetMediaItem(id)
 	if err != nil {
@@ -533,6 +537,15 @@ func (s *Server) serveItemImage(w http.ResponseWriter, r *http.Request, id, kind
 		writeErr(w, http.StatusBadGateway, "存储源缺失")
 		return
 	}
+
+	// 1) 命中缓存直接返回
+	cachePath := filepath.Join(s.Cfg.CacheDir, "images", id+"_"+kind)
+	if b, ct, ok := readImageCache(cachePath); ok {
+		serveImageBytes(w, r, b, ct)
+		return
+	}
+
+	// 2) 未命中：回源 OpenList 取图并落盘
 	u, err := s.clientFor(st).RawURL(p)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "取直链失败: "+err.Error())
@@ -548,13 +561,106 @@ func (s *Server) serveItemImage(w http.ResponseWriter, r *http.Request, id, kind
 		return
 	}
 	defer resp.Body.Close()
-	for _, k := range []string{"Content-Type", "Content-Length", "Accept-Ranges", "Content-Range", "Cache-Control", "Last-Modified", "Etag"} {
-		if v := resp.Header.Get(k); v != "" {
-			w.Header().Set(k, v)
-		}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/jpeg"
 	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "读取失败: "+err.Error())
+		return
+	}
+	writeImageCache(cachePath, b, ct)
+	serveImageBytes(w, r, b, ct)
+}
+
+// readImageCache 读取磁盘图片缓存（.bin + .ct 存 Content-Type）。
+func readImageCache(p string) (b []byte, ct string, ok bool) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, "", false
+	}
+	if c, err := os.ReadFile(p + ".ct"); err == nil {
+		ct = string(c)
+	}
+	return b, ct, true
+}
+
+// writeImageCache 原子写入图片缓存（临时文件 + rename，避免并发读到半截）。
+func writeImageCache(p string, b []byte, ct string) {
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return
+	}
+	_ = os.WriteFile(tmp+".ct", []byte(ct), 0o644)
+	_ = os.Rename(tmp, p)
+	_ = os.Rename(tmp+".ct", p+".ct")
+}
+
+// serveImageBytes 返回图片字节，支持 Range 分段（浏览器/播放器常见）。
+func serveImageBytes(w http.ResponseWriter, r *http.Request, b []byte, ct string) {
+	if ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	total := len(b)
+	rng := r.Header.Get("Range")
+	if rng == "" || !strings.HasPrefix(rng, "bytes=") {
+		w.Header().Set("Content-Length", strconv.Itoa(total))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+		return
+	}
+	spec := strings.TrimPrefix(rng, "bytes=")
+	var start, end int
+	if !parseRange(spec, &start, &end) {
+		w.Header().Set("Content-Length", strconv.Itoa(total))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+		return
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end <= 0 || end >= total {
+		end = total - 1
+	}
+	if start > end {
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	w.Header().Set("Content-Range", "bytes "+strconv.Itoa(start)+"-"+strconv.Itoa(end)+"/"+strconv.Itoa(total))
+	w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+	w.WriteHeader(http.StatusPartialContent)
+	_, _ = w.Write(b[start : end+1])
+}
+
+// parseRange 解析 HTTP Range 的 bytes= 规格（"start-end" / "start-" / "-end"）。
+// 出错或格式非法返回 false。
+func parseRange(spec string, start, end *int) bool {
+	dash := strings.Index(spec, "-")
+	if dash < 0 {
+		return false
+	}
+	sPart := strings.TrimSpace(spec[:dash])
+	ePart := strings.TrimSpace(spec[dash+1:])
+	if sPart != "" {
+		v, err := strconv.Atoi(sPart)
+		if err != nil {
+			return false
+		}
+		*start = v
+	}
+	if ePart != "" {
+		v, err := strconv.Atoi(ePart)
+		if err != nil {
+			return false
+		}
+		*end = v
+	}
+	return true
 }
 
 // rescrapeItem 手动重刮削单个条目（例如初次扫描时还没配 TMDB Key，补配后重跑）。
@@ -580,7 +686,7 @@ func (s *Server) rescrapeItem(w http.ResponseWriter, r *http.Request, id string)
 		searcher = scraper.NewTMDBSearcher(key)
 	}
 	// 保留已存本地图路径；NFO 路径重新推导代价高，这里以 TMDB 兜底为主。
-	if err := scraper.Scrape(r.Context(), item, lib, s.Store, cl, searcher, "", item.PosterPath, item.BackdropPath); err != nil {
+	if err := scraper.Scrape(r.Context(), item, lib, s.Store, cl, searcher, "", item.PosterPath, item.BackdropPath, nil); err != nil {
 		writeErr(w, http.StatusInternalServerError, "刮削失败: "+err.Error())
 		return
 	}

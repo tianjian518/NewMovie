@@ -4,7 +4,9 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -143,7 +145,9 @@ type runner struct {
 
 // consume 根据库模式决定如何入库一个文件，并触发刮削。
 func (r *runner) consume(dir string, names []string, o openlist.FsObj) error {
-	isStrm := strings.EqualFold(containerOf(o.Name), "strm")
+	// .strm 与 .cas（139cas 的指针文件，OpenList rebrand）均按 strm 同类处理。
+	ext := strings.ToLower(containerOf(o.Name))
+	isStrm := ext == "strm" || ext == "cas"
 	switch {
 	case isStrm && (r.lib.Mode == model.ModeStrm || r.lib.Mode == model.ModeMixed):
 		return r.consumeStrm(dir, names, o)
@@ -195,9 +199,110 @@ func (r *runner) scrapeFor(item model.MediaItem, dir, fileName string, names []s
 	if !r.force && item.PosterURL != "" {
 		return // 命中缓存，跳过
 	}
-	nfo, poster, backdrop := siblingPaths(dir, baseNoExt(fileName), names)
+	base := baseNoExt(fileName)
+	nfo, poster, backdrop := siblingPaths(dir, base, names)
+
+	// 剧集：tvshow.nfo 与系列级海报/背景通常在父目录（剧集根目录），需沿父目录向上查找。
+	// 系列级 tvshow.nfo 优先级高于同目录的单集 nfo（episodedetails），因它才是系列身份（tmdb id/剧名）。
+	if item.Kind == model.KindSeries {
+		if t := r.findUp(dir, "tvshow.nfo", names); t != "" {
+			nfo = t
+		}
+		if poster == "" {
+			if p := r.findUp(dir, "poster.jpg", names); p != "" {
+				poster = p
+			}
+		}
+		if backdrop == "" {
+			if b := r.findUp(dir, "fanart.jpg", names); b != "" {
+				backdrop = b
+			}
+		}
+	}
+
+	// 手动锁定（同目录或父目录的 .vidrive.json）最高优先级。
+	var manual *scraper.ManualMeta
+	if v := r.findUp(dir, ".vidrive.json", names); v != "" {
+		if s, ok := r.probe(v); ok {
+			manual = parseVidriveJSON(s)
+		}
+	}
+
 	r.rl.Take() // 刮削（读 NFO / 调 TMDB）额外一次请求，仍走限速
-	_ = scraper.Scrape(r.ctx, item, r.lib, r.st, r.client, r.searcher, nfo, poster, backdrop)
+	_ = scraper.Scrape(r.ctx, item, r.lib, r.st, r.client, r.searcher, nfo, poster, backdrop, manual)
+}
+
+// probe 读取一个候选文本文件（NFO / .vidrive.json），返回内容与是否可读。
+// 优先走 OpenList（native/mixed），失败再回退本地文件（ModeStrm 指向本地目录时）。
+// 读不到（不存在/无权限）返回 ("", false)。
+func (r *runner) probe(p string) (string, bool) {
+	if s, err := r.client.ReadText(p); err == nil {
+		return s, true
+	}
+	if b, err := os.ReadFile(p); err == nil {
+		return string(b), true
+	}
+	return "", false
+}
+
+// findUp 在「同目录 + 向上若干层父目录」中查找名为 fileName 的文件，返回首个命中的完整路径。
+// 用于 tvshow.nfo / poster.jpg / .vidrive.json 不在视频同目录、而在剧集根目录的场景。
+// 同目录优先用 names 清单（零请求）；父目录逐层用 probe 探测存在性（命中即停，最多 6 层）。
+func (r *runner) findUp(dir, fileName string, names []string) string {
+	has := func(name string) bool {
+		for _, s := range names {
+			if strings.EqualFold(s, name) {
+				return true
+			}
+		}
+		return false
+	}
+	if has(fileName) {
+		return path.Join(dir, fileName)
+	}
+	r.rl.Take() // 父目录探测同样走限速
+	cur := dir
+	for i := 0; i < 6; i++ {
+		parent := path.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+		cand := path.Join(cur, fileName)
+		if _, ok := r.probe(cand); ok {
+			return cand
+		}
+	}
+	return ""
+}
+
+// parseVidriveJSON 解析同目录 .vidrive.json，提取用户手动锁定的元数据。
+// 例：{"tmdb_id":27205,"type":"movie","title":"盗梦空间","year":2010}
+// type 取 "movie"/"tv" 用于强制条目类型；缺省不覆盖。
+func parseVidriveJSON(s string) *scraper.ManualMeta {
+	var m struct {
+		TMDBID  int64  `json:"tmdb_id"`
+		Type    string `json:"type"`
+		Title   string `json:"title"`
+		Year    int    `json:"year"`
+		Season  int    `json:"season"`
+		Episode int    `json:"episode"`
+	}
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil
+	}
+	if m.TMDBID == 0 && m.Title == "" && m.Year == 0 {
+		return nil
+	}
+	mm := &scraper.ManualMeta{TMDBID: m.TMDBID, Title: m.Title, Year: m.Year}
+	if strings.EqualFold(m.Type, "tv") {
+		mm.Kind = model.KindSeries
+	} else if strings.EqualFold(m.Type, "movie") {
+		mm.Kind = model.KindMovie
+	}
+	_ = m.Season
+	_ = m.Episode
+	return mm
 }
 
 // ingestNative 把原生（OpenList）视频文件入库为 MediaItem + MediaFile，返回规范化的 item。

@@ -1,5 +1,8 @@
+# syntax=docker/dockerfile:1
+
 # ---- 阶段 1：前端构建 ----
-FROM node:22-alpine AS web
+# 固定在构建机原生平台执行（产物为 JS/CSS，与架构无关），避免在每个目标架构下重复用 QEMU 跑 node。
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
@@ -7,24 +10,30 @@ COPY web/ ./
 # 构建产物输出到 /src/cmd/server/dist（与 Go embed 路径一致）
 RUN npm run build
 
-# ---- 阶段 2：后端构建（零依赖，CGO 关闭，多架构） ----
-FROM golang:1.23-alpine AS backend
+# ---- 阶段 2：后端构建（多架构交叉编译，零依赖，CGO 关闭） ----
+# 用 TARGETPLATFORM / TARGETARCH 让 go 直接交叉编译，无需 QEMU 模拟整条工具链。
+FROM --platform=$TARGETPLATFORM golang:1.23-alpine AS backend
 WORKDIR /src
+ARG TARGETARCH
+ARG TARGETVARIANT
 COPY go.mod ./
 RUN go mod download || true
 COPY . .
 # 把前端构建产物带进来，供 Go embed 进二进制
 COPY --from=web /src/cmd/server/dist ./cmd/server/dist
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/vidrive ./cmd/server
+# arm/v7 需 GOARM=7，其余架构 GOARM 留空（被忽略）。
+RUN GOARM=$( [ "$TARGETARCH" = "arm" ] && echo 7 || echo "" ) && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOARM=${GOARM} \
+    go build -ldflags="-s -w" -o /out/newmovie ./cmd/server
 
-# ---- 阶段 3：运行镜像 ----
-FROM alpine:3.20 AS run
+# ---- 阶段 3：运行镜像（多架构） ----
+FROM --platform=$TARGETPLATFORM alpine:3.20 AS run
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
-COPY --from=backend /out/vidrive /app/vidrive
+COPY --from=backend /out/newmovie /app/newmovie
 EXPOSE 8096
 VOLUME ["/data"]
 ENV VIDRIVE_DATA=/data \
     VIDRIVE_ADDR=:8096 \
     TZ=Asia/Shanghai
-ENTRYPOINT ["/app/vidrive"]
+ENTRYPOINT ["/app/newmovie"]

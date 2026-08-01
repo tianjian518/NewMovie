@@ -10,6 +10,7 @@ type Config struct {
 	Addr         string // HTTP 监听地址
 	DataDir      string // 数据根目录 (/data)
 	DBFile       string // JSON 存储文件路径
+	CacheDir     string // 图片/直链缓存根目录 (DataDir/cache)
 	AdminUser    string
 	AdminPass    string
 	TMDBKey      string
@@ -34,6 +35,7 @@ func Load() *Config {
 		}
 	}
 	c.DBFile = c.DataDir + "/newmovie.json"
+	c.CacheDir = c.DataDir + "/cache"
 	return c
 }
 

@@ -47,6 +47,15 @@ func (t tmdbSearcher) ByID(ctx context.Context, isTV bool, id int64) (*tmdb.Meta
 	return t.c.ByID(ctx, isTV, id)
 }
 
+// ManualMeta 用户通过同目录 .vidrive.json 手动锁定的元数据，优先级高于 NFO 与 TMDB。
+// 用于「我明确知道这就是 TMDB 12345」的场景，避免被错误搜索结果带偏。
+type ManualMeta struct {
+	TMDBID int64
+	Title  string
+	Year   int
+	Kind   model.MediaKind // 非空则强制覆盖条目类型（movie/tv）
+}
+
 // Scrape 刮削单个 MediaItem 并回写。
 //
 // 参数：
@@ -60,7 +69,7 @@ func (t tmdbSearcher) ByID(ctx context.Context, isTV bool, id int64) (*tmdb.Meta
 // 图片优先级：同目录本地图 > NFO 远程 thumb/fanart > TMDB。
 // 元数据优先级：NFO(tmdb id/标题/年份/简介) > TMDB(简介/rating/year) > 解析器结果(已在 item 中)。
 func Scrape(ctx context.Context, item model.MediaItem, lib model.Library, st store.Store,
-	reader NFOReader, searcher Searcher, nfoPath, posterPath, backdropPath string) error {
+	reader NFOReader, searcher Searcher, nfoPath, posterPath, backdropPath string, manual *ManualMeta) error {
 
 	var (
 		tmdbID      int64
@@ -77,6 +86,22 @@ func Scrape(ctx context.Context, item model.MediaItem, lib model.Library, st sto
 				tmdbID, year, title, overview, nfoPoster, nfoBackdrop = t, y, ti, ov, po, ba
 				hasNFO = true
 			}
+		}
+	}
+
+	// 手动锁定（.vidrive.json）优先级高于 NFO：先覆盖，使后续 TMDB 直接 ByID 锁定 id。
+	if manual != nil {
+		if manual.Kind != "" {
+			item.Kind = manual.Kind
+		}
+		if manual.TMDBID != 0 {
+			tmdbID = manual.TMDBID
+		}
+		if manual.Title != "" {
+			title = manual.Title
+		}
+		if manual.Year != 0 {
+			year = manual.Year
 		}
 	}
 
@@ -148,6 +173,21 @@ func Scrape(ctx context.Context, item model.MediaItem, lib model.Library, st sto
 	}
 	if tm != nil && tm.Rating > 0 {
 		item.Rating = tm.Rating
+	}
+	// 手动锁定最终兜底：即使 TMDB 返回了不同结果，用户锁定的值仍最高优先级。
+	if manual != nil {
+		if manual.Title != "" {
+			item.Title = manual.Title
+		}
+		if manual.Year != 0 {
+			item.Year = manual.Year
+		}
+		if manual.TMDBID != 0 {
+			item.TMDBID = manual.TMDBID
+		}
+		if manual.Kind != "" {
+			item.Kind = manual.Kind
+		}
 	}
 	item.PosterURL = posterURL
 	item.BackdropURL = backdropURL
