@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route, Link, useNavigate, useParams } from "react-router-dom";
 import { api, getToken, setToken, clearToken } from "./api";
-import type { MediaItem, ScanJob, ContinueRow, FavoriteRow } from "./types";
+import type { MediaItem, ScanJob, ContinueRow, FavoriteRow, Library as LibraryType } from "./types";
 import Library from "./pages/Library";
 import Detail from "./pages/Detail";
 import Player from "./pages/Player";
 import Settings from "./pages/Settings";
 import PosterCard from "./components/PosterCard";
+import { stripJson } from "./components/DirPicker";
 
 // Login 通过 onLogin 回调把 token 交回给 App，触发重新渲染。
 // 只写 localStorage 是不够的 —— React 不会因为 localStorage 变化而重渲染，
@@ -106,6 +107,86 @@ function ContinuePage() {
             })}
           </div>
         )}
+    </div>
+  );
+}
+
+// 首页仪表盘：继续观看 + 最近添加 + 媒体库入口，向 Emby 的「首页」体验靠拢。
+function Dashboard() {
+  const [cont, setCont] = useState<ContinueRow[]>([]);
+  const [recent, setRecent] = useState<MediaItem[]>([]);
+  const [libs, setLibs] = useState<LibraryType[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      api.listContinue().then(setCont).catch(() => {}),
+      api.search({ sort: "recent", limit: 24 }).then(setRecent).catch(() => {}),
+      api.listLibraries().then(setLibs).catch(() => {}),
+    ]).finally(() => setLoading(false));
+  }, []);
+
+  const modeLabel = (m: string) =>
+    ({ native: "原生模式", strm: "STRM 模式", mixed: "混合模式" } as Record<string, string>)[m] || m;
+
+  return (
+    <div className="space-y-8">
+      {cont.length > 0 && (
+        <section>
+          <h2 className="text-xl font-bold mb-3">继续观看</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            {cont.map((r) => {
+              const pct = r.duration > 0 ? Math.min(100, Math.round((r.position / r.duration) * 100)) : 0;
+              const label = r.episode_no > 0
+                ? (r.season_no > 1 ? `S${r.season_no}E${r.episode_no}` : `第 ${r.episode_no} 集`)
+                : "";
+              return (
+                <Link key={r.id} to={"/play/" + r.file_id} className="block group">
+                  {r.item ? <PosterCard item={r.item} /> :
+                    <div className="aspect-[2/3] bg-card rounded-lg flex items-center justify-center text-xs text-gray-500 p-2 text-center">{r.file_name}</div>}
+                  <div className="h-1 bg-white/10 rounded mt-1.5">
+                    <div className="h-full bg-brand rounded" style={{ width: pct + "%" }} />
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1 truncate">
+                    {label && <span className="text-brand mr-1">{label}</span>}
+                    {fmtTime(r.position)} / {fmtTime(r.duration)}
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      <section>
+        <h2 className="text-xl font-bold mb-3">最近添加</h2>
+        {loading ? <p className="text-gray-400 text-sm">加载中…</p> :
+          recent.length === 0 ? <p className="text-gray-500 text-sm">还没有内容，去「媒体库」扫描导入吧。</p> :
+            <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-4">
+              {recent.map((it) => (
+                <Link key={it.id} to={"/item/" + it.id}><PosterCard item={it} /></Link>
+              ))}
+            </div>}
+      </section>
+
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xl font-bold">媒体库</h2>
+          <Link to="/libraries" className="text-sm text-blue-400">管理媒体库 →</Link>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {libs.map((l) => (
+            <Link key={l.id} to={"/library/" + l.id} className="bg-card rounded-lg p-5 hover:ring-2 hover:ring-brand">
+              <div className="text-lg font-semibold">{l.name}</div>
+              <div className="text-xs text-gray-400 mt-2">{modeLabel(l.mode)} · {l.root_path}</div>
+            </Link>
+          ))}
+          <Link to="/libraries" className="bg-card rounded-lg p-5 hover:ring-2 hover:ring-brand flex items-center justify-center text-gray-400">
+            + 创建媒体库
+          </Link>
+        </div>
+      </section>
     </div>
   );
 }
@@ -218,8 +299,16 @@ function LibraryItems() {
       const r = await api.scan(id);
       poll(r.job_id);
     } catch (e: any) {
-      // 后端对重复扫描回 409，属于预期内提示而非报错
-      setErr(e?.message?.includes("正在扫描") ? "该媒体库正在扫描中，请稍候" : (e?.message || "启动扫描失败"));
+      // 后端对重复扫描回 409，属于预期内提示而非报错；
+      // 预检失败回 400 且带人话原因，直接透出而不是丢一坨 JSON 给用户。
+      const raw = e?.message || "";
+      if (raw.includes("正在扫描")) {
+        setErr("该媒体库正在扫描中，请稍候");
+      } else {
+        setErr(stripJson(raw) || "启动扫描失败");
+        // 预检已把失败原因写进 ScanJob，拉一次好让下方诊断面板显示出来。
+        api.latestScanJob(id).then(setJob).catch(() => {});
+      }
     }
   }
 
@@ -252,6 +341,7 @@ function LibraryItems() {
       {job && job.status === "running" && (
         <div className="text-sm text-gray-400 mb-3">
           扫描中 {job.done}/{job.total || "?"}
+          {job.dirs ? <span className="text-gray-500"> · 已遍历 {job.dirs} 个目录</span> : null}
           {job.total > 0 && (
             <span className="inline-block align-middle ml-2 w-32 h-1 bg-white/10 rounded">
               <span className="block h-full bg-brand rounded" style={{ width: Math.min(100, (job.done / job.total) * 100) + "%" }} />
@@ -259,6 +349,7 @@ function LibraryItems() {
           )}
         </div>
       )}
+      <ScanDiagnostics job={job} />
       {err && <p className="text-red-400 text-sm mb-3">{err}</p>}
       {items.length === 0 ? (
         <p className="text-gray-500 text-sm">
@@ -273,6 +364,38 @@ function LibraryItems() {
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+// ScanDiagnostics 把扫描任务的失败原因/跳过提示/警告摊开给用户看。
+// 以前扫描出问题只表现为「海报墙一片空白」，用户既不知道错在哪，也无从下手。
+function ScanDiagnostics({ job }: { job: ScanJob | null }) {
+  if (!job || job.status === "running") return null;
+  const warns = job.warnings || [];
+  if (!job.error && !job.skip_hint && warns.length === 0) return null;
+  return (
+    <div className="mb-3 space-y-2">
+      {job.error && (
+        <div className="rounded bg-red-500/10 border border-red-500/30 p-3 text-sm text-red-300">
+          <b>扫描失败：</b>{job.error}
+        </div>
+      )}
+      {job.skip_hint && (
+        <div className="rounded bg-amber-500/10 border border-amber-500/30 p-3 text-sm text-amber-200">
+          <b>提示：</b>{job.skip_hint}
+        </div>
+      )}
+      {warns.length > 0 && (
+        <details className="rounded bg-white/5 border border-white/10 p-3 text-sm text-gray-300">
+          <summary className="cursor-pointer text-gray-400">
+            有 {warns.length} 个目录/文件被跳过（点开查看）
+          </summary>
+          <ul className="mt-2 space-y-1 text-xs text-gray-400 max-h-48 overflow-y-auto">
+            {warns.map((wmsg, i) => <li key={i} className="break-all">· {wmsg}</li>)}
+          </ul>
+        </details>
       )}
     </div>
   );
@@ -315,9 +438,10 @@ export default function App() {
     <div className="min-h-screen flex">
       <aside className="w-48 bg-panel p-4 space-y-2 shrink-0 flex flex-col">
         <div className="text-xl font-bold mb-6">NewMovie</div>
-        <Link className="block px-3 py-2 rounded hover:bg-card" to="/">媒体库</Link>
+        <Link className="block px-3 py-2 rounded hover:bg-card" to="/">首页</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/continue">继续观看</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/favorites">收藏</Link>
+        <Link className="block px-3 py-2 rounded hover:bg-card" to="/libraries">媒体库</Link>
         <Link className="block px-3 py-2 rounded hover:bg-card" to="/settings">设置</Link>
         <button onClick={logout} className="mt-auto text-left px-3 py-2 rounded text-gray-400 hover:bg-card hover:text-gray-200">
           退出登录
@@ -325,9 +449,10 @@ export default function App() {
       </aside>
       <main className="flex-1 p-6 overflow-auto">
         <Routes>
-          <Route path="/" element={<Library />} />
+          <Route path="/" element={<Dashboard />} />
           <Route path="/continue" element={<ContinuePage />} />
           <Route path="/favorites" element={<FavoritesPage />} />
+          <Route path="/libraries" element={<Library />} />
           <Route path="/library/:id" element={<LibraryItems />} />
           <Route path="/item/:id" element={<Detail />} />
           <Route path="/play/:fileId" element={<Player />} />

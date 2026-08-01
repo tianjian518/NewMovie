@@ -1,7 +1,7 @@
 // 后端 API 客户端。token 存 localStorage，所有请求自动带 Authorization。
 import type {
   Storage, Library, MediaItem, PlayDecision, ScanJob, PathRewrite,
-  ItemDetail, ContinueRow, FavoriteRow,
+  ItemDetail, ContinueRow, FavoriteRow, BrowseResp,
 } from "./types";
 
 const TOKEN_KEY = "vidrive_token";
@@ -57,6 +57,11 @@ export const api = {
       body: JSON.stringify(s),
     }),
   listDrives: (id: string) => req<any[]>("/api/storages/" + id + "/drives"),
+  // 浏览网盘目录（建库时的目录树选择器用），path 缺省为根。
+  browse: (id: string, path = "/", refresh = false) =>
+    req<BrowseResp>(
+      "/api/storages/" + id + "/browse?path=" + encodeURIComponent(path) + (refresh ? "&refresh=1" : "")
+    ),
 
   listLibraries: () => req<Library[]>("/api/libraries"),
   createLibrary: (l: Partial<Library>) =>
@@ -84,9 +89,9 @@ export const api = {
     req<PlayDecision>("/api/items/" + fileId + "/play"),
 
   // 全局搜索 / 筛选 / 排序
-  search: (p: { q?: string; kind?: string; library?: string; sort?: string }) => {
+  search: (p: { q?: string; kind?: string; library?: string; sort?: string; limit?: number }) => {
     const qs = new URLSearchParams();
-    Object.entries(p).forEach(([k, v]) => { if (v) qs.set(k, v); });
+    Object.entries(p).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
     return req<MediaItem[]>("/api/search?" + qs.toString());
   },
 

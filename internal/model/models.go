@@ -20,9 +20,9 @@ type Storage struct {
 	ID        string      `json:"id"`
 	Name      string      `json:"name"`
 	Type      StorageType `json:"type"`
-	BaseURL   string      `json:"base_url"` // 例: http://openlist:5244
-	Token     string      `json:"token"`    // OpenList API token
-	SignKey   string      `json:"sign_key"` // OpenList 后台 "签名所有" 密钥
+	BaseURL   string      `json:"base_url"`   // 例: http://openlist:5244
+	Token     string      `json:"token"`      // OpenList API token
+	SignKey   string      `json:"sign_key"`   // OpenList 后台 "签名所有" 密钥
 	RateLimit float64     `json:"rate_limit"` // req/s，默认 2
 	CreatedAt int64       `json:"created_at"`
 }
@@ -73,7 +73,7 @@ type MediaItem struct {
 	PosterStorageID   string `json:"poster_storage_id,omitempty"`
 	BackdropPath      string `json:"backdrop_path,omitempty"`
 	BackdropStorageID string `json:"backdrop_storage_id,omitempty"`
-	CreatedAt   int64     `json:"created_at"`
+	CreatedAt         int64  `json:"created_at"`
 }
 
 type Season struct {
@@ -100,32 +100,54 @@ const (
 )
 
 type MediaFile struct {
-	ID          string     `json:"id"`
-	ItemID      string     `json:"item_id"`
-	EpisodeID   string     `json:"episode_id,omitempty"`
-	StorageID   string     `json:"storage_id"`
-	Source      SourceType `json:"source"` // native | strm
-	Path        string     `json:"path"`   // OpenList 内部路径 或 本地绝对路径
-	StrmRaw     string     `json:"strm_raw,omitempty"` // 原始 strm 文本行（仅 strm 源）
-	Size        int64      `json:"size"`
-	Modified    int64      `json:"modified"`
-	Container   string     `json:"container"`    // mp4/mkv/webm
-	VideoCodec  string     `json:"video_codec"`  // h264/h265/av1...
-	AudioCodec  string     `json:"audio_codec"`  // aac/mp3/dts/truehd...
-	DurationSec int        `json:"duration_sec"`
-	SeasonNo    int        `json:"season_no"`    // 剧集：季
-	EpisodeNo   int        `json:"episode_no"`   // 剧集：集
-	SupportsRange bool     `json:"supports_range"`
-	ProbeState  string     `json:"probe_state"` // pending/done/skipped
-	CreatedAt   int64      `json:"created_at"`
+	ID            string     `json:"id"`
+	ItemID        string     `json:"item_id"`
+	EpisodeID     string     `json:"episode_id,omitempty"`
+	StorageID     string     `json:"storage_id"`
+	Source        SourceType `json:"source"`             // native | strm
+	Path          string     `json:"path"`               // OpenList 内部路径 或 本地绝对路径
+	StrmRaw       string     `json:"strm_raw,omitempty"` // 原始 strm 文本行（仅 strm 源）
+	Size          int64      `json:"size"`
+	Modified      int64      `json:"modified"`
+	Container     string     `json:"container"`   // mp4/mkv/webm
+	VideoCodec    string     `json:"video_codec"` // h264/h265/av1...
+	AudioCodec    string     `json:"audio_codec"` // aac/mp3/dts/truehd...
+	DurationSec   int        `json:"duration_sec"`
+	SeasonNo      int        `json:"season_no"`  // 剧集：季
+	EpisodeNo     int        `json:"episode_no"` // 剧集：集
+	SupportsRange bool       `json:"supports_range"`
+	ProbeState    string     `json:"probe_state"` // pending/done/skipped
+	// 外挂字幕（同目录 sidecar）与音轨列表，播放器用于切换。
+	Subtitles   []Subtitle   `json:"subtitles,omitempty"`
+	AudioTracks []AudioTrack `json:"audio_tracks,omitempty"`
+	CreatedAt   int64        `json:"created_at"`
+}
+
+// Subtitle 一条外挂字幕（与媒体文件同目录的 sidecar）。
+type Subtitle struct {
+	ID        string `json:"id"`
+	StorageID string `json:"storage_id"` // 与媒体同存储源
+	Path      string `json:"path"`       // OpenList 内部路径
+	Lang      string `json:"lang"`       // 语言代码：zh/en/und...
+	Title     string `json:"title"`      // 显示名（如「简体中文」「English」）
+	Ext       string `json:"ext"`        // srt/vtt/ass/ssa
+	Source    string `json:"source"`     // sidecar
+}
+
+// AudioTrack 一条音轨（MKV/MP4 多音轨场景）。
+type AudioTrack struct {
+	Index int    `json:"index"` // 流序号（ffprobe 的 stream index）
+	Lang  string `json:"lang"`  // 语言代码
+	Codec string `json:"codec"` // aac/dts/truehd/opus...
+	Title string `json:"title"` // 显示名
 }
 
 // ---- strm 路径重写规则 ----
 
 type PathRewrite struct {
-	ID         string `json:"id"`
-	Priority   int    `json:"priority"`   // 越小越先匹配
-	Pattern    string `json:"pattern"`   // 正则
+	ID          string `json:"id"`
+	Priority    int    `json:"priority"`    // 越小越先匹配
+	Pattern     string `json:"pattern"`     // 正则
 	Replacement string `json:"replacement"` // 例: openlist://main/$1
 }
 
@@ -168,10 +190,10 @@ const (
 )
 
 type Favorite struct {
-	ID     string        `json:"id"`
-	UserID string        `json:"user_id"`
-	ItemID string        `json:"item_id"`
-	Kind   FavoriteKind  `json:"kind"`
+	ID     string       `json:"id"`
+	UserID string       `json:"user_id"`
+	ItemID string       `json:"item_id"`
+	Kind   FavoriteKind `json:"kind"`
 }
 
 // ---- 扫描任务 ----
@@ -185,6 +207,18 @@ type ScanJob struct {
 	Cursor     string `json:"cursor"` // 断点续扫位置
 	StartedAt  int64  `json:"started_at"`
 	FinishedAt int64  `json:"finished_at"`
+
+	// Error 记录致命失败原因（根目录不存在、鉴权失败等）。
+	// 没有它的时候，扫描失败在前端只表现为「扫不出内容」，用户完全无从排查。
+	Error string `json:"error,omitempty"`
+	// Warnings 记录非致命问题（某子目录无权限被跳过、目录成环等），最多 MaxScanWarnings 条。
+	Warnings []string `json:"warnings,omitempty"`
+	// Skipped 因库模式不匹配而跳过的文件数（如 native 库里全是 .strm）。
+	Skipped int `json:"skipped"`
+	// SkipHint 对 Skipped 的人话解释，直接展示给用户。
+	SkipHint string `json:"skip_hint,omitempty"`
+	// Dirs 已遍历目录数，用于区分「目录是空的」与「压根没走到」。
+	Dirs int `json:"dirs"`
 }
 
 // NowMillis 便捷时间戳。

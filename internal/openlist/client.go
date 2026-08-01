@@ -179,8 +179,45 @@ type fsGetResp struct {
 
 // ---- API 方法 ----
 
+// NormalizePath 把用户手填的网盘路径整理成 OpenList 能接受的形式。
+//
+// OpenList 的 /api/fs/list 对路径相当挑剔：缺前导斜杠、多一个尾斜杠、
+// 前后带空格（从别处复制粘贴时极常见）都会直接返回 code=500 object not found，
+// 表现给用户就是「路径明明是对的，却一个文件都扫不出来」。
+// 这里统一收口：去首尾空白与不可见字符、反斜杠转正斜杠、折叠重复斜杠、
+// 补前导斜杠、去尾斜杠（根目录除外）。
+func NormalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	// 去掉从网页复制常带的零宽字符与 NBSP
+	p = strings.Map(func(r rune) rune {
+		switch r {
+		case '\u200b', '\u200c', '\u200d', '\ufeff', '\u00a0':
+			return -1
+		}
+		return r
+	}, p)
+	p = strings.ReplaceAll(p, "\\", "/")
+	if p == "" {
+		return "/"
+	}
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	if len(p) > 1 {
+		p = strings.TrimRight(p, "/")
+	}
+	if p == "" {
+		return "/"
+	}
+	return p
+}
+
 // List 列出某路径下的内容。refresh=false 复用 OpenList 缓存（风控友好）。
 func (c *Client) List(path string, refresh bool) ([]FsObj, error) {
+	path = NormalizePath(path)
 	body, _ := json.Marshal(fsListReq{Path: path, Refresh: refresh})
 	resp, err := c.do("/api/fs/list", body)
 	if err != nil {
@@ -198,6 +235,7 @@ func (c *Client) List(path string, refresh bool) ([]FsObj, error) {
 
 // GetLink 取某文件的直链信息（raw_url + /d/ url + 所需 headers）。
 func (c *Client) GetLink(path string, refresh bool) (*fsGetResp, error) {
+	path = NormalizePath(path)
 	body, _ := json.Marshal(fsGetReq{Path: path, Refresh: refresh})
 	resp, err := c.do("/api/fs/get", body)
 	if err != nil {

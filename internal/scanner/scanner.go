@@ -19,12 +19,18 @@ import (
 	"newmovie/internal/scraper"
 	"newmovie/internal/store"
 	"newmovie/internal/strm"
+	"newmovie/internal/subtitle"
 )
 
 // MaxScanDepth 是目录递归的最大深度。
 // 真实媒体库极少超过 10 层（库根/剧名/季/文件），设为 24 已非常宽松；
 // 超过它几乎必然是目录成环或异常挂载，继续下钻只会把内存耗尽。
 const MaxScanDepth = 24
+
+// MaxScanWarnings 单次扫描最多保留的警告条数。
+// 一个挂载掉线的网盘能刷出上万条同样的错误，全存下来只会把 JSON 库撑爆，
+// 而用户看前 50 条就足够定位问题了。
+const MaxScanWarnings = 50
 
 // RateLimiter 简单令牌桶。
 type RateLimiter struct {
@@ -68,6 +74,10 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 	searcher scraper.Searcher, onProgress func(done, total int)) error {
 
 	rl := NewRateLimiter(rate)
+	// 用户手填的路径十有八九带着复制粘贴的脏东西（缺前导斜杠、尾斜杠、空格）。
+	// 不在这里收口，OpenList 会对每一种变体都回 code=500，用户只看到「扫不出内容」。
+	lib.RootPath = openlist.NormalizePath(lib.RootPath)
+
 	job := model.ScanJob{
 		ID:        "job-" + lib.ID,
 		LibraryID: lib.ID,
@@ -88,19 +98,22 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 	// 容器 restart 策略再拉起 → 无限重启。这里用「深度上限 + 已访问集合」双保险。
 	visited := make(map[string]bool)
 
-	var walk func(p string, depth int) error
-	walk = func(p string, depth int) error {
+	// walk 只在「无法继续的致命错误」时返回 err（根目录读不到、上下文取消）。
+	// 子目录级别的问题一律降级成 warning 继续走 —— 一个没权限的子目录
+	// 不该让整个媒体库颗粒无收。
+	var walk func(p string, depth int, isRoot bool) error
+	walk = func(p string, depth int, isRoot bool) error {
 		if run.ctx.Err() != nil {
 			return run.ctx.Err()
 		}
 		if depth > MaxScanDepth {
-			log.Printf("[scan] 目录深度超过上限 %d，跳过：%s", MaxScanDepth, p)
+			run.warn("目录深度超过上限 %d，跳过：%s", MaxScanDepth, p)
 			return nil
 		}
 		// 规范化后判重，命中说明目录成环（或被重复挂载），直接跳过而非继续下钻。
 		key := path.Clean(p)
 		if visited[key] {
-			log.Printf("[scan] 检测到目录环，跳过：%s", p)
+			run.warn("检测到目录环，跳过：%s", p)
 			return nil
 		}
 		visited[key] = true
@@ -108,8 +121,16 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 		run.rl.Take() // 限速：风控核心
 		objs, err := run.client.List(p, false)
 		if err != nil {
-			return err
+			if isRoot {
+				return err // 根目录都读不到，继续没有意义
+			}
+			run.warn("目录读取失败已跳过：%s（%v）", p, err)
+			return nil
 		}
+		run.mu.Lock()
+		run.dirs++
+		run.mu.Unlock()
+
 		var names []string
 		for _, o := range objs {
 			names = append(names, o.Name)
@@ -121,13 +142,14 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 			}
 			full := path.Join(p, o.Name)
 			if o.IsDir {
-				if err := walk(full, depth+1); err != nil {
-					return err
+				if err := walk(full, depth+1, false); err != nil {
+					return err // 只可能是 ctx 取消，需要一路冒泡
 				}
 				continue
 			}
 			if err := run.consume(p, names, o); err != nil {
-				return err
+				// 单个文件入库/刮削失败（网盘抽风、strm 内容读不到）不该拖垮整库。
+				run.warn("文件处理失败已跳过：%s（%v）", full, err)
 			}
 		}
 		run.mu.Lock()
@@ -136,39 +158,103 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client *openli
 		return nil
 	}
 
-	err := walk(lib.RootPath, 0)
+	err := walk(lib.RootPath, 0, true)
 	run.mu.Lock()
 	job.Done = run.done
 	job.Total = run.total
 	job.Cursor = run.cursor
+	job.Dirs = run.dirs
+	job.Skipped = run.skipped
+	job.Warnings = run.warnings
 	job.FinishedAt = model.NowMillis()
+	skipStrm, skipNative, done, dirs := run.skipStrm, run.skipNative, run.done, run.dirs
+	run.mu.Unlock()
+
 	if err != nil {
 		job.Status = "failed"
+		job.Error = FriendlyErr(lib.RootPath, err)
 	} else {
 		job.Status = "done"
+		job.SkipHint = skipHint(lib, done, dirs, skipStrm, skipNative)
 	}
-	run.mu.Unlock()
 	_ = st.UpdateScanJob(job)
 	return err
 }
 
+// FriendlyErr 把 OpenList 的原始报错翻译成用户能照着操作的中文提示。
+func FriendlyErr(root string, err error) string {
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "object not found"), strings.Contains(low, "not found"), strings.Contains(low, "404"):
+		return fmt.Sprintf("网盘里找不到路径「%s」。请确认它是 OpenList 内部路径（以挂载点开头，如 /115/影视），而不是本地路径或带域名的网址。", root)
+	case strings.Contains(low, "unauthorized"), strings.Contains(low, "401"), strings.Contains(low, "token"):
+		return "OpenList 鉴权失败，请回到「设置」重新填写 Token 并测试连接。"
+	case strings.Contains(low, "connection refused"), strings.Contains(low, "no such host"), strings.Contains(low, "timeout"), strings.Contains(low, "deadline"):
+		return fmt.Sprintf("连不上 OpenList（%v）。请检查地址是否可达、容器之间网络是否互通。", err)
+	case strings.Contains(low, "context canceled"):
+		return "扫描被中断。"
+	}
+	return "扫描失败：" + msg
+}
+
+// skipHint 在「扫描成功但一条都没入库」时，给出最可能的原因。
+// 这是用户最容易卡住的地方：路径没错、连接也通，就是空空如也。
+func skipHint(lib model.Library, done, dirs, skipStrm, skipNative int) string {
+	if done > 0 {
+		if skipStrm > 0 && lib.Mode == model.ModeNative {
+			return fmt.Sprintf("另有 %d 个 .strm 文件因当前是「原生模式」被跳过，需要的话把媒体库改成「混合模式」。", skipStrm)
+		}
+		return ""
+	}
+	switch {
+	case dirs == 0:
+		return "根目录没读到任何内容。"
+	case skipStrm > 0 && lib.Mode == model.ModeNative:
+		return fmt.Sprintf("目录里找到 %d 个 .strm 文件，但当前媒体库是「原生模式」只收视频文件。请把模式改成「STRM 模式」或「混合模式」后重新扫描。", skipStrm)
+	case skipNative > 0 && lib.Mode == model.ModeStrm:
+		return fmt.Sprintf("目录里找到 %d 个视频文件，但当前媒体库是「STRM 模式」只收 .strm。请把模式改成「原生模式」或「混合模式」后重新扫描。", skipNative)
+	default:
+		return fmt.Sprintf("已遍历 %d 个目录，但没发现可识别的视频文件（支持 mp4/mkv/webm/mov/avi/ts/m2ts/flv 与 .strm）。请确认选的是存放影片的目录。", dirs)
+	}
+}
+
 // runner 扫描运行上下文，避免每层函数传一长串参数。
 type runner struct {
-	ctx      context.Context
-	lib      model.Library
-	st       store.Store
-	client   *openlist.Client
-	storages []model.Storage
-	rewrites []model.PathRewrite
-	searcher scraper.Searcher
-	rl       *RateLimiter
+	ctx        context.Context
+	lib        model.Library
+	st         store.Store
+	client     *openlist.Client
+	storages   []model.Storage
+	rewrites   []model.PathRewrite
+	searcher   scraper.Searcher
+	rl         *RateLimiter
 	onProgress func(done, total int)
-	force     bool // 强制重刮（忽略已有缓存）；rescrape 用
+	force      bool // 强制重刮（忽略已有缓存）；rescrape 用
 
 	mu     sync.Mutex
 	done   int
 	total  int
 	cursor string
+
+	dirs       int      // 已成功列举的目录数
+	skipped    int      // 因模式不匹配跳过的文件总数
+	skipStrm   int      // 其中：.strm 文件（native 模式下会被跳过）
+	skipNative int      // 其中：普通视频文件（strm 模式下会被跳过）
+	warnings   []string // 非致命问题，上限 MaxScanWarnings
+}
+
+// warn 记录一条非致命警告（同时打日志），超过上限后只计数不再追加。
+func (r *runner) warn(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[scan] %s", msg)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.warnings) < MaxScanWarnings {
+		r.warnings = append(r.warnings, msg)
+	} else if len(r.warnings) == MaxScanWarnings {
+		r.warnings = append(r.warnings, fmt.Sprintf("（后续警告已省略，仅保留前 %d 条）", MaxScanWarnings))
+	}
 }
 
 // consume 根据库模式决定如何入库一个文件，并触发刮削。
@@ -182,7 +268,20 @@ func (r *runner) consume(dir string, names []string, o openlist.FsObj) error {
 	case !isStrm && isVideo(o.Name) && (r.lib.Mode == model.ModeNative || r.lib.Mode == model.ModeMixed):
 		return r.consumeNative(dir, names, o)
 	}
-	return nil // 模式不匹配，跳过
+	// 模式不匹配则跳过，但要统计下来：
+	// 「目录里明明有片子却扫出 0 条」几乎都是建库时模式选错，
+	// 不记这笔账，用户永远只能看到一个空荡荡的海报墙。
+	if isStrm || isVideo(o.Name) {
+		r.mu.Lock()
+		r.skipped++
+		if isStrm {
+			r.skipStrm++
+		} else {
+			r.skipNative++
+		}
+		r.mu.Unlock()
+	}
+	return nil
 }
 
 // dirChain 返回从文件所在目录到库根（不含库根之上）的各层目录名，由近及远。
@@ -221,7 +320,8 @@ func (r *runner) bumpProgress() {
 }
 
 func (r *runner) consumeNative(dir string, names []string, o openlist.FsObj) error {
-	item, err := ingestNative(r.st, r.lib, r.storages, r.rewrites, path.Join(dir, o.Name), o, r.dirChain(dir))
+	subs := detectSubtitles(dir, baseNoExt(o.Name), names, r.lib.StorageID)
+	item, err := ingestNative(r.st, r.lib, r.storages, r.rewrites, path.Join(dir, o.Name), o, r.dirChain(dir), subs)
 	if err != nil {
 		return err
 	}
@@ -236,13 +336,45 @@ func (r *runner) consumeStrm(dir string, names []string, o openlist.FsObj) error
 	if err != nil {
 		return err
 	}
-	item, err := IngestStrm(r.st, r.lib, r.storages, r.rewrites, o.Name, content, dir, r.dirChain(dir))
+	subs := detectSubtitles(dir, baseNoExt(o.Name), names, r.lib.StorageID)
+	item, err := IngestStrm(r.st, r.lib, r.storages, r.rewrites, o.Name, content, dir, r.dirChain(dir), subs)
 	if err != nil {
 		return err
 	}
 	r.bumpProgress()
 	r.scrapeFor(item, dir, o.Name, names)
 	return nil
+}
+
+// detectSubtitles 从同目录文件清单里挑出属于该媒体的外挂字幕。
+// 规则：字幕基名等于媒体基名，或以「媒体基名.」开头（如 Movie.zh.srt / Movie.chi.ass）。
+// 语言与显示名由文件名里的语言标记推断（subtitle.DetectLang）。
+func detectSubtitles(dir, mediaBase string, names []string, storageID string) []model.Subtitle {
+	var out []model.Subtitle
+	for _, n := range names {
+		ext := strings.ToLower(containerOf(n))
+		if !subtitle.IsSubtitleExt(ext) {
+			continue
+		}
+		base := n
+		if i := strings.LastIndex(n, "."); i > 0 {
+			base = n[:i]
+		}
+		if base != mediaBase && !strings.HasPrefix(base, mediaBase+".") {
+			continue
+		}
+		lang, title := subtitle.DetectLang(n)
+		out = append(out, model.Subtitle{
+			ID:        "sub-" + hash(path.Join(dir, n)),
+			StorageID: storageID,
+			Path:      path.Join(dir, n),
+			Lang:      lang,
+			Title:     title,
+			Ext:       ext,
+			Source:    "sidecar",
+		})
+	}
+	return out
 }
 
 // scrapeFor 计算同目录 NFO/本地图候选路径并刮削。
@@ -359,7 +491,7 @@ func parseVidriveJSON(s string) *scraper.ManualMeta {
 
 // ingestNative 把原生（OpenList）视频文件入库为 MediaItem + MediaFile，返回规范化的 item。
 func ingestNative(st store.Store, lib model.Library, storages []model.Storage, rewrites []model.PathRewrite,
-	full string, o openlist.FsObj, dirs []string) (model.MediaItem, error) {
+	full string, o openlist.FsObj, dirs []string, subs []model.Subtitle) (model.MediaItem, error) {
 
 	pr := parser.ParseInDir(o.Name, dirs)
 	kind := model.KindMovie
@@ -383,18 +515,19 @@ func ingestNative(st store.Store, lib model.Library, storages []model.Storage, r
 	saved := resolveItem(st, item)
 
 	f := model.MediaFile{
-		ID:          "f-" + hash(full),
-		ItemID:      saved.ID,
-		StorageID:   lib.StorageID,
-		Source:      model.SrcNative,
-		Path:        full,
-		Size:        int64(o.Size),
-		Modified:    int64(o.Modified),
-		Container:   containerOf(o.Name),
-		SeasonNo:    pr.Season,
-		EpisodeNo:   pr.Episode,
-		ProbeState:  "pending", // 懒探测（见 PLAN 4.4）
-		CreatedAt:   model.NowMillis(),
+		ID:         "f-" + hash(full),
+		ItemID:     saved.ID,
+		StorageID:  lib.StorageID,
+		Source:     model.SrcNative,
+		Path:       full,
+		Size:       int64(o.Size),
+		Modified:   int64(o.Modified),
+		Container:  containerOf(o.Name),
+		SeasonNo:   pr.Season,
+		EpisodeNo:  pr.Episode,
+		Subtitles:  subs,
+		ProbeState: "pending", // 懒探测（见 PLAN 4.4）
+		CreatedAt:  model.NowMillis(),
 	}
 	if err := st.SaveMediaFile(f); err != nil {
 		return saved, err
@@ -406,7 +539,7 @@ func ingestNative(st store.Store, lib model.Library, storages []model.Storage, r
 // raw 为 strm 文件内容（一行），strmPath 为 strm 文件所在目录（解析相对路径用）。
 // 返回规范化的 item。
 func IngestStrm(st store.Store, lib model.Library, storages []model.Storage, rewrites []model.PathRewrite,
-	strmName, raw, strmpath string, dirs []string) (model.MediaItem, error) {
+	strmName, raw, strmpath string, dirs []string, subs []model.Subtitle) (model.MediaItem, error) {
 
 	res := strm.NewResolver(storages, rewrites).Resolve(raw)
 	pr := parser.ParseInDir(strmName, dirs)
@@ -432,17 +565,18 @@ func IngestStrm(st store.Store, lib model.Library, storages []model.Storage, rew
 	// 文件 ID 必须按完整路径生成：不同剧里同名的「第1集.mp4.strm」若只按文件名 hash，
 	// 会算出同一个 ID 而互相覆盖，后导入的剧会「吃掉」先导入那部剧的分集。
 	f := model.MediaFile{
-		ID:          "f-" + hash(path.Join(strmpath, strmName)),
-		ItemID:      saved.ID,
-		StorageID:   res.StorageID,
-		Source:      model.SrcStrm,
-		Path:        res.Path,
-		StrmRaw:     raw,
-		Container:   containerFromURL(raw),
-		SeasonNo:    pr.Season,
-		EpisodeNo:   pr.Episode,
-		ProbeState:  "pending",
-		CreatedAt:   model.NowMillis(),
+		ID:         "f-" + hash(path.Join(strmpath, strmName)),
+		ItemID:     saved.ID,
+		StorageID:  res.StorageID,
+		Source:     model.SrcStrm,
+		Path:       res.Path,
+		StrmRaw:    raw,
+		Container:  containerFromURL(raw),
+		SeasonNo:   pr.Season,
+		EpisodeNo:  pr.Episode,
+		Subtitles:  subs,
+		ProbeState: "pending",
+		CreatedAt:  model.NowMillis(),
 	}
 	if res.Scheme == "openlist" {
 		f.Source = model.SrcStrm

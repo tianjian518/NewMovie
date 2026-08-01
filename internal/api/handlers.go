@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"encoding/json"
 	"errors"
 	"io"
@@ -29,11 +30,12 @@ import (
 	"newmovie/internal/scanner"
 	"newmovie/internal/scraper"
 	"newmovie/internal/store"
+	"newmovie/internal/subtitle"
 	"newmovie/internal/tmdb"
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.6"
+const Version = "1.1.7"
 
 // Server 持有依赖。
 type Server struct {
@@ -320,9 +322,115 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request, parts []
 			return
 		}
 		writeJSON(w, drives)
+	case len(parts) == 4 && parts[3] == "browse" && r.Method == http.MethodGet:
+		s.browseStorage(w, r, parts[2])
 	default:
 		writeErr(w, http.StatusNotFound, "unknown storages route")
 	}
+}
+
+// browseStorage 列出某存储源指定路径下的**子目录**，供前端目录树逐级展开。
+// GET /api/storages/{id}/browse?path=/115/影视
+//
+// 顺带统计每个目录内的视频/字幕文件数量：用户挑目录时最想知道的就是
+// 「这个文件夹里到底有没有片子」，光给个文件夹名等于让人瞎猜。
+// 统计只针对**当前层**（不递归），所以零额外请求。
+func (s *Server) browseStorage(w http.ResponseWriter, r *http.Request, storageID string) {
+	st, err := s.Store.GetStorage(storageID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "存储源不存在")
+		return
+	}
+	p := openlist.NormalizePath(r.URL.Query().Get("path"))
+	objs, err := s.clientFor(st).List(p, r.URL.Query().Get("refresh") == "1")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, browseErrMsg(p, err))
+		return
+	}
+	openlist.SortByName(objs)
+
+	dirs := make([]map[string]interface{}, 0, len(objs))
+	var videoCount, strmCount int
+	for _, o := range objs {
+		if o.Name == "." || o.Name == ".." || o.Name == "" {
+			continue
+		}
+		if o.IsDir {
+			dirs = append(dirs, map[string]interface{}{
+				"name":     o.Name,
+				"path":     path.Join(p, o.Name),
+				"modified": int64(o.Modified),
+			})
+			continue
+		}
+		switch {
+		case isStrmName(o.Name):
+			strmCount++
+		case isVideoName(o.Name):
+			videoCount++
+		}
+	}
+	writeJSON(w, map[string]interface{}{
+		"path":        p,
+		"parent":      parentPath(p),
+		"dirs":        dirs,
+		"video_count": videoCount,
+		"strm_count":  strmCount,
+		// suggest_mode 给前端一个建库模式的默认值，省得用户选错模式扫出个空库。
+		"suggest_mode": suggestMode(videoCount, strmCount),
+	})
+}
+
+// browseErrMsg 与扫描器共用一套人话翻译，保证「浏览失败」和「扫描失败」口径一致。
+func browseErrMsg(p string, err error) string {
+	low := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(low, "not found"), strings.Contains(low, "404"):
+		return "网盘里找不到路径「" + p + "」"
+	case strings.Contains(low, "401"), strings.Contains(low, "unauthorized"):
+		return "OpenList 鉴权失败，请检查 Token"
+	}
+	return "读取目录失败: " + err.Error()
+}
+
+func parentPath(p string) string {
+	if p == "/" || p == "" {
+		return ""
+	}
+	return openlist.NormalizePath(path.Dir(p))
+}
+
+func isVideoName(name string) bool {
+	switch strings.ToLower(extOf(name)) {
+	case "mp4", "mkv", "webm", "mov", "avi", "ts", "m2ts", "flv":
+		return true
+	}
+	return false
+}
+
+func isStrmName(name string) bool {
+	e := strings.ToLower(extOf(name))
+	return e == "strm" || e == "cas"
+}
+
+func extOf(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return name[i+1:]
+	}
+	return ""
+}
+
+// suggestMode 依据目录里实际有什么，推荐建库模式。
+func suggestMode(video, strm int) string {
+	switch {
+	case video > 0 && strm > 0:
+		return string(model.ModeMixed)
+	case strm > 0:
+		return string(model.ModeStrm)
+	case video > 0:
+		return string(model.ModeNative)
+	}
+	return ""
 }
 
 // testStorage 不落盘，仅验证连通性并返回已挂载网盘列表。
@@ -363,6 +471,8 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 		if lib.Mode == "" {
 			lib.Mode = model.ModeNative
 		}
+		// 存之前就把路径洗干净，避免「列表里显示的路径」和「实际扫描用的路径」不一致。
+		lib.RootPath = openlist.NormalizePath(lib.RootPath)
 		_ = s.Store.SaveLibrary(lib)
 		writeJSON(w, lib)
 	case len(parts) == 3 && r.Method == http.MethodDelete:
@@ -425,6 +535,25 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string)
 		return
 	}
 	cl := s.clientFor(st)
+
+	// 预检：扫描是异步的，根目录读不到的话用户要等到轮询才知道，
+	// 中间那段时间只会看到一个空白页面在转圈。这里先同步探一次，
+	// 路径错了立刻退 400 并说清楚错在哪。
+	lib.RootPath = openlist.NormalizePath(lib.RootPath)
+	if _, err := cl.List(lib.RootPath, false); err != nil {
+		s.unlockScan(lib.ID)
+		job := model.ScanJob{
+			ID: "job-" + lib.ID, LibraryID: lib.ID, Status: "failed",
+			StartedAt: model.NowMillis(), FinishedAt: model.NowMillis(),
+			Error: scanner.FriendlyErr(lib.RootPath, err),
+		}
+		_ = s.Store.SaveScanJob(job)
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]interface{}{
+			"job_id": job.ID, "status": "failed", "error": job.Error,
+		})
+		return
+	}
 	searcher := s.newSearcher()
 	// 用脱离请求的 context：避免 HTTP 响应返回后请求 ctx 被取消而中断后台扫描。
 	bg := context.Background()
@@ -544,6 +673,11 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Title < out[j].Title
 	})
+	if lim := r.URL.Query().Get("limit"); lim != "" {
+		if n, err := strconv.Atoi(lim); err == nil && n > 0 && n < len(out) {
+			out = out[:n]
+		}
+	}
 	writeJSON(w, out)
 }
 
@@ -802,6 +936,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 		s.handleRemux(w, r)
 		return
 	}
+	if len(parts) >= 3 && parts[2] == "subtitle" && r.Method == http.MethodGet {
+		s.handleSubtitle(w, r)
+		return
+	}
 	if len(parts) >= 3 && parts[2] == "proxy" && r.Method == http.MethodGet {
 		raw := r.URL.Query().Get("u")
 		if raw == "" {
@@ -891,14 +1029,17 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	cmd := exec.CommandContext(ctx, bin,
-		"-loglevel", "error",
-		"-i", "pipe:0",
-		"-c", "copy",
-		"-f", "mp4",
-		"-movflags", "+frag_keyframe+empty_moov",
-		"pipe:1",
-	)
+	args := []string{"-loglevel", "error", "-i", "pipe:0", "-c", "copy", "-f", "mp4",
+		"-movflags", "+frag_keyframe+empty_moov"}
+	// atrack：仅抽取指定音轨（多音轨 MKV 切换语言用）。
+	// 指定后不再 copy 全部流，而是显式映射视频 + 该音轨。
+	if at := r.URL.Query().Get("atrack"); at != "" {
+		if n, err := strconv.Atoi(at); err == nil && n >= 0 {
+			args = append(args, "-map", "0:v:0", "-map", "0:a:"+strconv.Itoa(n))
+		}
+	}
+	args = append(args, "pipe:1")
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = resp.Body
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -924,6 +1065,182 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	if err := cmd.Wait(); err != nil && ffmpegErr.Len() > 0 {
 		log.Printf("remux ffmpeg: %s", ffmpegErr.String())
 	}
+}
+
+// handleSubtitle 取外挂字幕字节并转成 WebVTT 返回给播放器。
+// 字幕与媒体同存储源，经 OpenList 直链拉取后由 subtitle.Convert 统一转换（srt→vtt / ass→vtt）。
+func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fileID := q.Get("file")
+	lang := q.Get("lang")
+	if fileID == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 file 参数")
+		return
+	}
+	f, err := s.Store.GetMediaFile(fileID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if len(f.Subtitles) == 0 {
+		writeErr(w, http.StatusNotFound, "该文件无外挂字幕")
+		return
+	}
+	// 选字幕：精确匹配语言优先；未指定语言时优先 und（默认轨），否则第一条。
+	var sub model.Subtitle
+	matched := false
+	for _, s2 := range f.Subtitles {
+		if lang != "" && s2.Lang == lang {
+			sub = s2
+			matched = true
+			break
+		}
+	}
+	if !matched && lang == "" {
+		for _, s2 := range f.Subtitles {
+			if s2.Lang == "und" {
+				sub = s2
+				matched = true
+				break
+			}
+		}
+	}
+	if !matched {
+		sub = f.Subtitles[0]
+	}
+
+	st, err := s.Store.GetStorage(sub.StorageID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "存储源不存在")
+		return
+	}
+	cl := s.clientFor(st)
+	link, err := cl.GetLink(sub.Path, s.Cfg.ProxyRefresh)
+	var rawURL string
+	if err == nil && link.Data.RawURL != "" {
+		rawURL = link.Data.RawURL
+	}
+	if rawURL == "" && st.SignKey != "" {
+		rawURL, _ = cl.RawURL(sub.Path)
+	}
+	if rawURL == "" {
+		writeErr(w, http.StatusBadGateway, "取字幕直链失败")
+		return
+	}
+	target, err := parseOutboundURL(rawURL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	resp, err := s.proxyClientFor(target).Do(req)
+	if err != nil {
+		if errors.Is(err, errBlockedTarget) {
+			writeErr(w, http.StatusForbidden, errBlockedTarget.Error())
+			return
+		}
+		writeErr(w, http.StatusBadGateway, "拉取字幕失败: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeErr(w, http.StatusBadGateway, "字幕源返回 "+strconv.Itoa(resp.StatusCode))
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "读取字幕失败")
+		return
+	}
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := subtitle.Convert(sub.Ext, data, w); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+}
+
+// probeFile 用 ffprobe 探测媒体：时长、音轨列表、编码。best-effort，
+// ffprobe 缺失或超时/失败一律返回错误，由调用方标记 probe 跳过，避免每次播放都重试。
+func (s *Server) probeFile(ctx context.Context, rawURL string) (dur int, audio []model.AudioTrack, vc, ac string, err error) {
+	bin, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return 0, nil, "", "", fmt.Errorf("ffprobe 不可用")
+	}
+	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(pctx, bin, "-v", "error",
+		"-show_entries", "stream=index,codec_type,codec_name:stream_tags=language,title:format=duration",
+		"-of", "json", rawURL)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err = cmd.Run(); err != nil {
+		return 0, nil, "", "", err
+	}
+	var probe struct {
+		Streams []struct {
+			Index     int    `json:"index"`
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+			Tags      struct {
+				Language string `json:"language"`
+				Title    string `json:"title"`
+			} `json:"tags"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if err = json.Unmarshal(out.Bytes(), &probe); err != nil {
+		return 0, nil, "", "", err
+	}
+	if d, e := strconv.ParseFloat(probe.Format.Duration, 64); e == nil {
+		dur = int(d)
+	}
+	for _, st := range probe.Streams {
+		switch st.CodecType {
+		case "video":
+			vc = normCodec(st.CodecName)
+		case "audio":
+			audio = append(audio, model.AudioTrack{
+				Index: st.Index,
+				Lang:  normLang(st.Tags.Language),
+				Codec: st.CodecName,
+				Title: st.Tags.Title,
+			})
+			if ac == "" {
+				ac = normCodec(st.CodecName)
+			}
+		}
+	}
+	return dur, audio, vc, ac, nil
+}
+
+// normCodec 把 ffprobe 的编码名归一为 playback 包使用的命名（hevc→h265）。
+func normCodec(c string) string {
+	switch strings.ToLower(c) {
+	case "hevc":
+		return "h265"
+	}
+	return strings.ToLower(c)
+}
+
+// normLang 把 ffprobe 的语言标记（chi/eng/jpn...）归一为 ISO 639-1。
+func normLang(l string) string {
+	switch strings.ToLower(strings.TrimSpace(l)) {
+	case "chi", "zho", "cn":
+		return "zh"
+	case "eng":
+		return "en"
+	case "jpn":
+		return "ja"
+	case "kor":
+		return "ko"
+	case "und", "":
+		return "und"
+	}
+	return strings.ToLower(strings.TrimSpace(l))
 }
 
 func (s *Server) saveRecord(w http.ResponseWriter, r *http.Request) {
@@ -963,6 +1280,26 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	}
 	if directURL == "" && st.SignKey != "" {
 		directURL = cl.SignedDURL(f.Path) // 自行算签名，不必让用户关签名
+	}
+
+	// 懒探测：首次播放时 ffprobe 一次，补全音轨列表/时长/编码并缓存进文件，
+	// 供播放器做音轨切换与更准的降级决策。失败（ffprobe 缺失/超时）标记 skipped 不再重试。
+	if f.ProbeState == "pending" && rawURL != "" {
+		if dur, atracks, pvc, pac, perr := s.probeFile(r.Context(), rawURL); perr == nil {
+			f.DurationSec = dur
+			f.AudioTracks = atracks
+			if pvc != "" {
+				f.VideoCodec = pvc
+			}
+			if pac != "" {
+				f.AudioCodec = pac
+			}
+			f.ProbeState = "done"
+			_ = s.Store.SaveMediaFile(f)
+		} else {
+			f.ProbeState = "skipped"
+			_ = s.Store.SaveMediaFile(f)
+		}
 	}
 
 	vc, ac := f.VideoCodec, f.AudioCodec
@@ -1013,6 +1350,16 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		}
 	}
 
+	// 字幕列表：每条带语言、显示名与后端转换服务的 URL。
+	subs := make([]map[string]string, 0, len(f.Subtitles))
+	for _, s2 := range f.Subtitles {
+		subs = append(subs, map[string]string{
+			"lang":  s2.Lang,
+			"title": s2.Title,
+			"url":   "/api/play/subtitle?file=" + fileID + "&lang=" + s2.Lang,
+		})
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"level":           int(dec.Level),
 		"label":           dec.Label,
@@ -1029,6 +1376,8 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		"item_id":         f.ItemID,
 		"title":           title,
 		"subtitle":        subtitle,
+		"subtitles":       subs,
+		"audio_tracks":    f.AudioTracks,
 	})
 }
 

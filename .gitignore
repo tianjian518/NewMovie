@@ -8,3 +8,4 @@
 /web/tsconfig.tsbuildinfo
 # 本地端到端验证产物（Playwright 截图），不入库
 /*_test.png
+/ui_*.png

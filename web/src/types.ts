@@ -68,6 +68,24 @@ export interface PlayDecision {
   item_id: string;
   title: string;
   subtitle: string;
+  // 字幕与音轨清单，供播放器切换
+  subtitles: Subtitle[];
+  audio_tracks: AudioTrack[];
+}
+
+// 字幕（外挂，经后端转成 WebVTT）。
+export interface Subtitle {
+  lang: string;
+  title: string;
+  url: string;
+}
+
+// 音轨（MKV/MP4 多音轨）。
+export interface AudioTrack {
+  index: number;
+  lang: string;
+  codec: string;
+  title: string;
 }
 
 // 详情接口返回：条目 + 文件 + 每个文件的观看进度 + 是否已收藏
@@ -105,6 +123,27 @@ export interface ScanJob {
   status: string;
   total: number;
   done: number;
+  cursor?: string;
+  error?: string;        // 致命失败原因（人话）
+  warnings?: string[];   // 非致命问题，如某子目录被跳过
+  skipped?: number;      // 因库模式不匹配跳过的文件数
+  skip_hint?: string;    // 对 skipped 的解释与建议
+  dirs?: number;         // 已遍历目录数
+}
+
+// BrowseResp 目录浏览接口返回，供建库时的目录树选择器使用。
+export interface BrowseDir {
+  name: string;
+  path: string;
+  modified: number;
+}
+export interface BrowseResp {
+  path: string;
+  parent: string;
+  dirs: BrowseDir[];
+  video_count: number;
+  strm_count: number;
+  suggest_mode: string;
 }
 
 export interface PathRewrite {

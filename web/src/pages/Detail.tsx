@@ -158,38 +158,45 @@ export default function Detail() {
 
   return (
     <div>
+      {/* Hero：背景图 + 标题浮层（Emby 风格） */}
       <div
-        className="h-48 rounded-xl mb-4 bg-cover bg-center"
-        style={{ backgroundImage: item.backdrop_url ? `url(${item.backdrop_url})` : undefined, background: "#171b22" }}
-      />
-      <div className="flex gap-6">
-        <div className="w-40 shrink-0"><PosterCard item={item} /></div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold">
+        className="relative h-64 rounded-xl mb-4 overflow-hidden bg-cover bg-center"
+        style={{ backgroundImage: item.backdrop_url ? `url("${item.backdrop_url}")` : undefined, background: "#171b22" }}
+      >
+        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
+        <div className="absolute bottom-0 left-0 p-6">
+          <h1 className="text-3xl font-bold drop-shadow">
             {item.title}
-            {item.year > 0 && <span className="text-gray-400 text-lg"> ({item.year})</span>}
+            {item.year > 0 && <span className="text-gray-300 text-xl"> ({item.year})</span>}
           </h1>
-          <div className="flex items-center gap-3 text-sm mt-1">
+          <div className="flex items-center gap-3 text-sm mt-2">
             {item.rating > 0 && <span className="text-yellow-400">★ {item.rating.toFixed(1)}</span>}
-            <span className="text-gray-500">{item.kind === "series" ? "剧集" : "电影"}</span>
-            {item.tmdb_id > 0 && <span className="text-gray-500">TMDB #{item.tmdb_id}</span>}
+            <span className="text-gray-300">{item.kind === "series" ? "剧集" : "电影"}</span>
+            {item.tmdb_id > 0 && <span className="text-gray-400">TMDB #{item.tmdb_id}</span>}
           </div>
-          <p className="text-gray-300 mt-3 text-sm leading-relaxed">{item.overview || "暂无简介"}</p>
-          {err && <p className="text-red-400 text-sm mt-2">{err}</p>}
           <div className="flex flex-wrap gap-2 mt-3">
             {sorted.length > 0 && (
-              <Link to={"/play/" + sorted[0].id} className="bg-brand rounded px-3 py-1 text-sm">
-                {progress[sorted[0].id] ? "继续播放" : "开始播放"}
+              <Link to={"/play/" + sorted[0].id} className="bg-brand rounded px-4 py-1.5 text-sm font-semibold">
+                {progress[sorted[0].id] ? "继续播放" : "▶ 播放"}
               </Link>
             )}
             <button
               disabled={busy}
               onClick={toggleFavorite}
-              className={"rounded px-3 py-1 text-sm border disabled:opacity-60 " +
-                (favored ? "bg-brand/20 border-brand text-brand" : "bg-card border-white/10")}
+              className={"rounded px-3 py-1.5 text-sm border disabled:opacity-60 " +
+                (favored ? "bg-brand/20 border-brand text-brand" : "bg-black/40 border-white/20")}
             >
               {favored ? "已收藏 ✓" : "收藏"}
             </button>
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-6">
+        <div className="w-40 shrink-0 -mt-20 relative z-10"><PosterCard item={item} /></div>
+        <div className="flex-1 pt-2">
+          <p className="text-gray-300 mt-3 text-sm leading-relaxed">{item.overview || "暂无简介"}</p>
+          {err && <p className="text-red-400 text-sm mt-2">{err}</p>}
+          <div className="flex flex-wrap gap-2 mt-3">
             <button disabled={busy} onClick={rescrape}
               className="bg-card border border-white/10 rounded px-3 py-1 text-sm disabled:opacity-60">
               重新刮削

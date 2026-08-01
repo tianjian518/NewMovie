@@ -15,14 +15,17 @@ function fmtTime(sec: number): string {
 
 // 播放页：请求五级降级决策，按策略渲染。
 //  L0/L1 → ArtPlayer 直接播
-//  L2/L3 → 提示需 Remux/转码（Phase 3 含 ffmpeg 镜像）
-//  L4    → 唤起外部播放器（直链传递）
+//  L2    → 服务端实时转封装（MKV 等）后页内播，支持选音轨
+//  L3/L4 → 唤起外部播放器（直链传递）
+// 字幕经后端转成 WebVTT 后可切换；多音轨 MKV 经 remux 选轨。
 // 进度全程回传后端（继续观看）。
 export default function Player() {
   const { fileId } = useParams();
   const [dec, setDec] = useState<PlayDecision | null>(null);
   const [err, setErr] = useState("");
   const [resumed, setResumed] = useState(0);
+  const [subLang, setSubLang] = useState("off");
+  const [audIdx, setAudIdx] = useState(-1);
   const ref = useRef<HTMLDivElement>(null);
   const artRef = useRef<any>(null);
 
@@ -31,9 +34,47 @@ export default function Player() {
     api.play(fileId).then(setDec).catch((e) => setErr(e.message));
   }, [fileId]);
 
+  // 把切换逻辑挂到实例上，供下方下拉调用。
+  const applySub = (lang: string) => {
+    const art = artRef.current;
+    if (!art) return;
+    setSubLang(lang);
+    try {
+      if (lang === "off") {
+        art.subtitle.hide();
+      } else {
+        const s = (dec?.subtitles || []).find((x) => x.lang === lang);
+        if (s) {
+          art.subtitle.switch(s.url, s.title);
+          art.subtitle.show();
+        }
+      }
+    } catch {
+      /* 某些格式无字幕轨时忽略 */
+    }
+  };
+  const applyAud = (idx: number) => {
+    const art = artRef.current;
+    if (!art || !dec || dec.level !== 2) return;
+    setAudIdx(idx);
+    if (idx < 0) return;
+    const cur = art.currentTime || 0;
+    const sep = dec.url.includes("?") ? "&" : "?";
+    const u = dec.url + sep + "atrack=" + idx;
+    try {
+      art.switchUrl(u);
+      const onCp = () => {
+        try { art.currentTime = cur; } catch {}
+        art.video.removeEventListener("canplay", onCp);
+      };
+      art.video.addEventListener("canplay", onCp);
+    } catch {
+      /* 切换失败静默 */
+    }
+  };
+
   useEffect(() => {
     if (!dec || !ref.current) return;
-    // 仅 L0/L1 用内置播放器
     if ((dec.level === 0 || dec.level === 1 || dec.level === 2) && dec.url) {
       const art = new ArtPlayer({
         container: ref.current,
@@ -45,12 +86,11 @@ export default function Player() {
       });
       artRef.current = art;
 
-      // 续播：进度一直在往后端存，却从来没读回来过 ——
-      // 侧边栏「继续观看」点进去居然是从头播的，这次真的接上。
+      // 续播：进度一直在往后端存，这次接上，从断点接着放。
       const resume = dec.resume_position || 0;
       art.on("ready", () => {
         if (resume > 3) {
-          try { art.currentTime = resume; } catch { /* 源不支持 seek 就算了 */ }
+          try { art.currentTime = resume; } catch {}
           setResumed(resume);
         }
       });
@@ -62,13 +102,12 @@ export default function Player() {
         }
       };
       const save = setInterval(flush, 10000);
-      // 关标签页/刷新时补存一次，否则最后不到 10 秒的进度会丢。
       window.addEventListener("beforeunload", flush);
 
       return () => {
         clearInterval(save);
         window.removeEventListener("beforeunload", flush);
-        flush(); // 离开页面前再落一次盘
+        flush();
         art.destroy();
       };
     }
@@ -85,6 +124,9 @@ export default function Player() {
   if (!dec) return <div className="text-gray-400">解析播放源…</div>;
 
   const ext = dec.raw_url || dec.direct_url;
+  const subs = dec.subtitles || [];
+  const auds = dec.audio_tracks || [];
+  const canSwitchAud = dec.level === 2 && auds.length > 1;
 
   return (
     <div>
@@ -94,15 +136,49 @@ export default function Player() {
           {dec.subtitle && <span className="text-gray-400 text-sm ml-2">{dec.subtitle}</span>}
         </h2>
       )}
-      <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
-        <span className="bg-brand rounded px-2 py-0.5">{dec.label}</span>
-        <span className="text-gray-400">{dec.reason}</span>
-        {resumed > 0 && (
-          <span className="text-gray-400 border border-white/10 rounded px-2 py-0.5">
-            已从 {fmtTime(resumed)} 继续播放
-          </span>
-        )}
-      </div>
+
+      {/* 字幕 / 音轨切换 */}
+      {(subs.length > 0 || canSwitchAud) && (
+        <div className="mb-3 flex flex-wrap items-center gap-4 text-sm">
+          {subs.length > 0 && (
+            <label className="flex items-center gap-2">
+              <span className="text-gray-400">字幕</span>
+              <select
+                className="bg-card rounded px-2 py-1"
+                value={subLang}
+                onChange={(e) => applySub(e.target.value)}
+              >
+                <option value="off">关闭</option>
+                {subs.map((s) => (
+                  <option key={s.lang + s.title} value={s.lang}>{s.title}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {canSwitchAud && (
+            <label className="flex items-center gap-2">
+              <span className="text-gray-400">音轨</span>
+              <select
+                className="bg-card rounded px-2 py-1"
+                value={audIdx}
+                onChange={(e) => applyAud(Number(e.target.value))}
+              >
+                <option value={-1}>默认</option>
+                {auds.map((a, i) => (
+                  <option key={a.index} value={i}>
+                    {a.title || a.lang || "音轨" + (i + 1)}（{a.codec}）
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {resumed > 0 && (
+            <span className="text-gray-400 border border-white/10 rounded px-2 py-0.5">
+              已从 {fmtTime(resumed)} 继续播放
+            </span>
+          )}
+        </div>
+      )}
 
       {(dec.level === 0 || dec.level === 1 || dec.level === 2) && dec.url ? (
         <div ref={ref} className="w-full aspect-video bg-black rounded-xl" />
