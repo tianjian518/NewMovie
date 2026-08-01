@@ -44,6 +44,10 @@ export const api = {
   listStorages: () => req<Storage[]>("/api/storages"),
   createStorage: (s: Partial<Storage>) =>
     req<Storage>("/api/storages", { method: "POST", body: JSON.stringify(s) }),
+  updateStorage: (id: string, s: Partial<Storage>) =>
+    req<Storage>("/api/storages/" + id, { method: "PUT", body: JSON.stringify(s) }),
+  deleteStorage: (id: string) =>
+    req<{ ok: boolean }>("/api/storages/" + id, { method: "DELETE" }),
   testStorage: (s: { base_url: string; token: string; sign_key: string }) =>
     req<{ ok: boolean; drives: any[] }>("/api/storages/test", {
       method: "POST",
@@ -54,6 +58,8 @@ export const api = {
   listLibraries: () => req<Library[]>("/api/libraries"),
   createLibrary: (l: Partial<Library>) =>
     req<Library>("/api/libraries", { method: "POST", body: JSON.stringify(l) }),
+  deleteLibrary: (id: string) =>
+    req<{ ok: boolean }>("/api/libraries/" + id, { method: "DELETE" }),
   libraryItems: (id: string) => req<MediaItem[]>("/api/libraries/" + id + "/items"),
   scan: (id: string) =>
     req<{ job_id: string; status: string }>("/api/libraries/" + id + "/scan", {
@@ -61,6 +67,7 @@ export const api = {
     }),
 
   scanJob: (jobId: string) => req<ScanJob>("/api/scan/" + jobId),
+  latestScanJob: (libId: string) => req<ScanJob>("/api/libraries/" + libId + "/scan"),
   item: (id: string) => req<{ item: MediaItem; files: MediaFile[] }>("/api/items/" + id),
   rescrape: (id: string) =>
     req<{ ok: boolean }>("/api/items/" + id + "/rescrape", { method: "POST" }),
@@ -88,4 +95,9 @@ export const api = {
   getSettings: () => req<Record<string, string>>("/api/settings"),
   saveSettings: (s: Record<string, string>) =>
     req<{ ok: boolean }>("/api/settings", { method: "PUT", body: JSON.stringify(s) }),
+  testTmdb: (api_key: string, api_base: string) =>
+    req<{ ok: boolean; endpoint: string; sample: string; poster: string }>("/api/settings/tmdb/test", {
+      method: "POST",
+      body: JSON.stringify({ api_key, api_base }),
+    }),
 };

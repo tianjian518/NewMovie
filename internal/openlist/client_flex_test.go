@@ -55,6 +55,13 @@ func TestFsObj_FlexInt64FromOpenList(t *testing.T) {
 			wantMod: mustUnix("2023-11-03T07:46:40Z"),
 		},
 		{
+			// 复现真实 OpenList（139cas）返回：纳秒精度 RFC3339 串
+			name:    "ISO 纳秒串（真实 OpenList）",
+			body:    `{"name":"a.mp4","size":1234,"is_dir":false,"modified":"2026-07-29T14:12:07.778495506Z"}`,
+			wantSz:  1234,
+			wantMod: mustUnix("2026-07-29T14:12:07.778495506Z"),
+		},
+		{
 			name:    "空/缺省回退 0",
 			body:    `{"name":"a.mp4"}`,
 			wantSz:  0,
@@ -100,5 +107,47 @@ func TestFsListResp_FlexInt64DoesNotAbortWholeList(t *testing.T) {
 	}
 	if int64(r.Data.Content[0].Modified) != 1699000000 {
 		t.Errorf("drive1.modified = %d, want 1699000000", int64(r.Data.Content[0].Modified))
+	}
+}
+
+// 真实 139cas OpenList 把 type 返回成数字，FsObj.Type 必须能接受。
+func TestFsObj_TypeAsNumber(t *testing.T) {
+	body := `{"name":"movie","size":1234,"is_dir":false,"modified":"2026-07-29T14:12:07.778495506Z","type":1}`
+	var o FsObj
+	if err := json.Unmarshal([]byte(body), &o); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if string(o.Type) != "1" {
+		t.Errorf("type = %q, want \"1\"", string(o.Type))
+	}
+	if int64(o.Modified) != mustUnix("2026-07-29T14:12:07.778495506Z") {
+		t.Errorf("modified = %d, want %d", int64(o.Modified), mustUnix("2026-07-29T14:12:07.778495506Z"))
+	}
+}
+
+// 用真实 OpenList 的字段形态（type=int, modified=纳秒串, size=int）跑整段列表，确保不崩。
+func TestFsListResp_RealOpenListShape(t *testing.T) {
+	body := `{
+		"code": 200, "message": "success",
+		"data": {
+			"content": [
+				{"name":"115","size":0,"is_dir":true,"modified":"2026-07-29T14:12:07.778495506Z","type":1},
+				{"name":"movie.mp4","size":1073741824,"is_dir":false,"modified":"2026-07-30T00:13:21.496688814Z","type":1}
+			],
+			"total": 2
+		}
+	}`
+	var r fsListResp
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatalf("整段列表解析失败: %v", err)
+	}
+	if len(r.Data.Content) != 2 {
+		t.Fatalf("期望 2 个对象，实际 %d", len(r.Data.Content))
+	}
+	if string(r.Data.Content[0].Type) != "1" {
+		t.Errorf("drive.type = %q, want \"1\"", string(r.Data.Content[0].Type))
+	}
+	if int64(r.Data.Content[1].Size) != 1073741824 {
+		t.Errorf("size = %d, want 1073741824", int64(r.Data.Content[1].Size))
 	}
 }

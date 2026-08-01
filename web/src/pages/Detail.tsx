@@ -4,6 +4,19 @@ import { api } from "../api";
 import type { MediaItem, MediaFile } from "../types";
 import PosterCard from "../components/PosterCard";
 
+// 按季、集排序；无集号的（电影/未识别）沉底并按文件名排，
+// 否则网盘返回什么顺序就显示什么顺序，13 集会乱序排列。
+function sortEpisodes(files: MediaFile[]): MediaFile[] {
+  return [...files].sort((a, b) => {
+    if (a.episode_no > 0 && b.episode_no > 0) {
+      return (a.season_no - b.season_no) || (a.episode_no - b.episode_no);
+    }
+    if (a.episode_no > 0) return -1;
+    if (b.episode_no > 0) return 1;
+    return a.path.localeCompare(b.path, "zh-CN");
+  });
+}
+
 // 详情页：海报/简介 + 文件（剧集）列表，点击进入播放。
 export default function Detail() {
   const { id } = useParams();
@@ -49,13 +62,20 @@ export default function Detail() {
 
       <h2 className="text-lg font-bold mt-6 mb-3">文件 / 剧集（{files.length}）</h2>
       <div className="space-y-2">
-        {files.map((f) => (
+        {sortEpisodes(files).map((f) => (
           <Link
             key={f.id}
             to={"/play/" + f.id}
             className="flex items-center justify-between bg-card rounded px-4 py-2 hover:ring-2 hover:ring-brand"
           >
-            <span className="truncate">{f.path.split("/").pop()}</span>
+            <span className="truncate">
+              {f.episode_no > 0 && (
+                <span className="text-brand mr-2">
+                  {f.season_no > 1 ? `S${f.season_no}E${f.episode_no}` : `第 ${f.episode_no} 集`}
+                </span>
+              )}
+              {f.path.split("/").pop()}
+            </span>
             <span className="text-xs text-gray-400">{f.container || "?"} · {f.source}</span>
           </Link>
         ))}

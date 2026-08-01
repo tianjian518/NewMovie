@@ -45,6 +45,8 @@ export interface MediaFile {
   video_codec: string;
   audio_codec: string;
   duration_sec: number;
+  season_no: number;
+  episode_no: number;
   supports_range: boolean;
   probe_state: string;
 }

@@ -40,6 +40,11 @@ type tmdbSearcher struct{ c *tmdb.Client }
 // NewTMDBSearcher 用 API Key 构造 Searcher；key 为空时调用方应传 nil 跳过 TMDB。
 func NewTMDBSearcher(apiKey string) Searcher { return tmdbSearcher{c: tmdb.New(apiKey)} }
 
+// NewTMDBSearcherWithBase 额外指定 API 根（用户自建反代 / 镜像），base 为空等同 NewTMDBSearcher。
+func NewTMDBSearcherWithBase(apiKey, base string) Searcher {
+	return tmdbSearcher{c: tmdb.NewWithBase(apiKey, base)}
+}
+
 func (t tmdbSearcher) Search(ctx context.Context, kind, query string, year int) (*tmdb.Meta, error) {
 	return t.c.Search(ctx, kind, query, year)
 }

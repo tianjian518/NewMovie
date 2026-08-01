@@ -14,7 +14,8 @@ type Config struct {
 	AdminUser    string
 	AdminPass    string
 	TMDBKey      string
-	ProxyRefresh bool // 默认 refresh=false 复用 OpenList 缓存
+	TMDBBase     string // TMDB API 根地址覆盖（自建反代/镜像），空则用官方 + 内置备用域名
+	ProxyRefresh bool   // 默认 refresh=false 复用 OpenList 缓存
 	DefaultRate  float64
 }
 
@@ -26,6 +27,7 @@ func Load() *Config {
 		AdminUser:    getenv("VIDRIVE_ADMIN_USER", "admin"),
 		AdminPass:    getenv("VIDRIVE_ADMIN_PASS", "admin"),
 		TMDBKey:      os.Getenv("TMDB_API_KEY"),
+		TMDBBase:     os.Getenv("TMDB_API_BASE"),
 		ProxyRefresh: false,
 		DefaultRate:  2.0, // 保守限速，风控友好
 	}

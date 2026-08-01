@@ -185,6 +185,30 @@ func (r *runner) consume(dir string, names []string, o openlist.FsObj) error {
 	return nil // 模式不匹配，跳过
 }
 
+// dirChain 返回从文件所在目录到库根（不含库根之上）的各层目录名，由近及远。
+// 供解析器在文件名只有集数时向上找剧名——网盘剧集普遍是「剧名/(季)/第N集.strm」结构。
+// 限制在库根以内，避免把「电影」「国漫」这类分类目录当成剧名。
+func (r *runner) dirChain(dir string) []string {
+	root := path.Clean(r.lib.RootPath)
+	cur := path.Clean(dir)
+	var out []string
+	for i := 0; i < MaxScanDepth; i++ {
+		if cur == "/" || cur == "." || cur == "" {
+			break
+		}
+		out = append(out, path.Base(cur))
+		if cur == root {
+			break // 库根本身可入选（如库根就叫「将夜 (2026)」），但不再往上
+		}
+		parent := path.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return out
+}
+
 func (r *runner) bumpProgress() {
 	r.mu.Lock()
 	r.done++
@@ -197,7 +221,7 @@ func (r *runner) bumpProgress() {
 }
 
 func (r *runner) consumeNative(dir string, names []string, o openlist.FsObj) error {
-	item, err := ingestNative(r.st, r.lib, r.storages, r.rewrites, path.Join(dir, o.Name), o)
+	item, err := ingestNative(r.st, r.lib, r.storages, r.rewrites, path.Join(dir, o.Name), o, r.dirChain(dir))
 	if err != nil {
 		return err
 	}
@@ -212,7 +236,7 @@ func (r *runner) consumeStrm(dir string, names []string, o openlist.FsObj) error
 	if err != nil {
 		return err
 	}
-	item, err := IngestStrm(r.st, r.lib, r.storages, r.rewrites, o.Name, content, dir)
+	item, err := IngestStrm(r.st, r.lib, r.storages, r.rewrites, o.Name, content, dir, r.dirChain(dir))
 	if err != nil {
 		return err
 	}
@@ -335,15 +359,17 @@ func parseVidriveJSON(s string) *scraper.ManualMeta {
 
 // ingestNative 把原生（OpenList）视频文件入库为 MediaItem + MediaFile，返回规范化的 item。
 func ingestNative(st store.Store, lib model.Library, storages []model.Storage, rewrites []model.PathRewrite,
-	full string, o openlist.FsObj) (model.MediaItem, error) {
+	full string, o openlist.FsObj, dirs []string) (model.MediaItem, error) {
 
-	pr := parser.Parse(o.Name)
+	pr := parser.ParseInDir(o.Name, dirs)
 	kind := model.KindMovie
 	if pr.IsSeries {
 		kind = model.KindSeries
 	}
+	// 条目 ID 按 剧名+年份 生成：同一部剧的每一集必须归到同一个条目下，
+	// 否则 20 集就会在海报墙上铺出 20 个方块。
 	item := model.MediaItem{
-		ID:        "m-" + hash(full),
+		ID:        itemID(lib.ID, pr.Title, pr.Year),
 		LibraryID: lib.ID,
 		Kind:      kind,
 		Title:     pr.Title,
@@ -354,10 +380,7 @@ func ingestNative(st store.Store, lib model.Library, storages []model.Storage, r
 		return model.MediaItem{}, err
 	}
 	// 取回规范化后的 item（去重合并后），供刮削使用
-	saved, err := st.GetMediaItem(item.ID)
-	if err != nil {
-		saved = item
-	}
+	saved := resolveItem(st, item)
 
 	f := model.MediaFile{
 		ID:          "f-" + hash(full),
@@ -383,16 +406,18 @@ func ingestNative(st store.Store, lib model.Library, storages []model.Storage, r
 // raw 为 strm 文件内容（一行），strmPath 为 strm 文件所在目录（解析相对路径用）。
 // 返回规范化的 item。
 func IngestStrm(st store.Store, lib model.Library, storages []model.Storage, rewrites []model.PathRewrite,
-	strmName, raw, strmpath string) (model.MediaItem, error) {
+	strmName, raw, strmpath string, dirs []string) (model.MediaItem, error) {
 
 	res := strm.NewResolver(storages, rewrites).Resolve(raw)
-	pr := parser.Parse(strmName)
+	pr := parser.ParseInDir(strmName, dirs)
 	kind := model.KindMovie
 	if pr.IsSeries {
 		kind = model.KindSeries
 	}
+	// 同一部剧的多个 strm 必须合并成一个条目（ID 由 剧名+年份 决定），
+	// 旧实现按文件名 hash 建 ID，导致「第1集」「第2集」各成一条。
 	item := model.MediaItem{
-		ID:        "m-" + hash(strmName),
+		ID:        itemID(lib.ID, pr.Title, pr.Year),
 		LibraryID: lib.ID,
 		Kind:      kind,
 		Title:     pr.Title,
@@ -402,13 +427,12 @@ func IngestStrm(st store.Store, lib model.Library, storages []model.Storage, rew
 	if err := st.UpsertMediaItemByTitle(item); err != nil {
 		return model.MediaItem{}, err
 	}
-	saved, err := st.GetMediaItem(item.ID)
-	if err != nil {
-		saved = item
-	}
+	saved := resolveItem(st, item)
 
+	// 文件 ID 必须按完整路径生成：不同剧里同名的「第1集.mp4.strm」若只按文件名 hash，
+	// 会算出同一个 ID 而互相覆盖，后导入的剧会「吃掉」先导入那部剧的分集。
 	f := model.MediaFile{
-		ID:          "f-" + hash(strmName),
+		ID:          "f-" + hash(path.Join(strmpath, strmName)),
 		ItemID:      saved.ID,
 		StorageID:   res.StorageID,
 		Source:      model.SrcStrm,
@@ -497,6 +521,29 @@ func containerFromURL(u string) string {
 }
 
 // hash 简易去重键（非加密）。
+// itemID 由 库+剧名+年份 生成条目 ID，保证同一部剧的所有剧集落到同一条目。
+func itemID(libID, title string, year int) string {
+	return "m-" + hash(libID+"|"+strings.ToLower(strings.TrimSpace(title))+"|"+fmt.Sprint(year))
+}
+
+// resolveItem 取回 upsert 后的规范条目。
+// UpsertMediaItemByTitle 以 标题+年份 去重并**保留已存在条目的 ID**，
+// 旧版本库里的条目 ID 是按文件名 hash 生成的，与新规则不同；
+// 直接按新 ID 取会落空并导致重复写入，故按 标题+年份 再兜一次底。
+func resolveItem(st store.Store, want model.MediaItem) model.MediaItem {
+	if saved, err := st.GetMediaItem(want.ID); err == nil {
+		return saved
+	}
+	if list, err := st.ListMediaItems(want.LibraryID); err == nil {
+		for _, x := range list {
+			if x.Title == want.Title && x.Year == want.Year {
+				return x
+			}
+		}
+	}
+	return want
+}
+
 func hash(s string) string {
 	var h uint64 = 1469598103934665603
 	for i := 0; i < len(s); i++ {

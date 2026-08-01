@@ -50,9 +50,9 @@ type FsObj struct {
 	Size     FlexInt64 `json:"size"`
 	IsDir    bool      `json:"is_dir"`
 	Modified FlexInt64 `json:"modified"` // 秒级时间戳
-	Thumb    string    `json:"thumb"`
-	Type     string    `json:"type"`
-	Sign     string    `json:"sign"`
+	Thumb    string     `json:"thumb"`
+	Type     FlexString `json:"type"`
+	Sign     string     `json:"sign"`
 }
 
 // FlexInt64 兼容 OpenList 系接口把数值字段（size / modified）有时传数字、
@@ -92,8 +92,10 @@ func (f *FlexInt64) UnmarshalJSON(b []byte) error {
 		*f = FlexInt64(int64(v))
 		return nil
 	}
-	// ISO 日期串：转成 unix 秒
+	// ISO 日期串：转成 unix 秒（优先 RFC3339Nano，兼容 OpenList 返回的纳秒精度时间戳，
+	// 如 "2026-07-29T14:12:07.778495506Z"）
 	for _, layout := range []string{
+		time.RFC3339Nano,
 		time.RFC3339,
 		"2006-01-02T15:04:05",
 		"2006-01-02 15:04:05",
@@ -109,6 +111,44 @@ func (f *FlexInt64) UnmarshalJSON(b []byte) error {
 
 func (f FlexInt64) MarshalJSON() ([]byte, error) {
 	return json.Marshal(int64(f))
+}
+
+// FlexString 兼容 OpenList 把 type 等字段有时传字符串、有时传数字（真实 139cas 返回 int）的
+// 不一致行为，反序列化时统一归一为 string（该字段仅用于展示，不参与业务逻辑）。
+type FlexString string
+
+func (f *FlexString) UnmarshalJSON(b []byte) error {
+	*f = ""
+	s := strings.TrimSpace(string(b))
+	if len(s) == 0 || s == "null" {
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err == nil {
+			*f = FlexString(str)
+		}
+		return nil
+	}
+	if s[0] == '-' || (s[0] >= '0' && s[0] <= '9') {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+			*f = FlexString(strconv.FormatInt(v, 10))
+			return nil
+		}
+		if v, err := strconv.ParseFloat(s, 64); err == nil {
+			*f = FlexString(strconv.FormatFloat(v, 'f', -1, 64))
+			return nil
+		}
+	}
+	var v interface{}
+	if err := json.Unmarshal(b, &v); err == nil {
+		*f = FlexString(fmt.Sprintf("%v", v))
+	}
+	return nil
+}
+
+func (f FlexString) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(f))
 }
 
 type fsListResp struct {

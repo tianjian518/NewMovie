@@ -83,6 +83,22 @@ function LibraryItems() {
   const load = () => api.libraryItems(id).then(setItems).catch(() => {});
   useEffect(() => { load(); }, [id]);
 
+  // 挂载时若后台已有进行中的扫描（如「创建并扫描导入」自动发起的），自动轮询进度。
+  useEffect(() => {
+    let tick: any;
+    api.latestScanJob(id).then((j) => {
+      setJob(j);
+      if (j.status === "running") {
+        tick = setInterval(async () => {
+          const cur = await api.scanJob(j.id);
+          setJob(cur);
+          if (cur.status !== "running") { clearInterval(tick); load(); }
+        }, 1500);
+      }
+    }).catch(() => {});
+    return () => { if (tick) clearInterval(tick); };
+  }, [id]);
+
   async function scan() {
     const r = await api.scan(id);
     const tick = setInterval(async () => {
@@ -96,7 +112,7 @@ function LibraryItems() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold">海报墙</h2>
-        <button onClick={scan} className="bg-brand rounded px-3 py-1 text-sm">扫描</button>
+        <button onClick={scan} className="bg-brand rounded px-3 py-1 text-sm">扫描导入</button>
       </div>
       {job && job.status === "running" && (
         <div className="text-sm text-gray-400 mb-3">扫描中 {job.done}/{job.total}</div>

@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 
 	"newmovie/internal/auth"
 	"newmovie/internal/config"
@@ -22,10 +23,11 @@ import (
 	"newmovie/internal/scanner"
 	"newmovie/internal/scraper"
 	"newmovie/internal/store"
+	"newmovie/internal/tmdb"
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.4"
+const Version = "1.1.5"
 
 // Server 持有依赖。
 type Server struct {
@@ -82,6 +84,27 @@ func (s *Server) tmdbKey() string {
 		return v
 	}
 	return ""
+}
+
+// tmdbBase 解析 TMDB API 根地址覆盖（自建反代/镜像）：环境变量优先，其次前端设置。
+// 返回空串表示用官方地址 + 内置备用域名自动兜底。
+func (s *Server) tmdbBase() string {
+	if s.Cfg.TMDBBase != "" {
+		return s.Cfg.TMDBBase
+	}
+	if v, err := s.Store.GetSetting("tmdb_api_base"); err == nil && v != "" {
+		return v
+	}
+	return ""
+}
+
+// newSearcher 按当前配置构造刮削搜索器；未配置 Key 时返回 nil（调用方据此跳过 TMDB）。
+func (s *Server) newSearcher() scraper.Searcher {
+	key := s.tmdbKey()
+	if key == "" {
+		return nil
+	}
+	return scraper.NewTMDBSearcherWithBase(key, s.tmdbBase())
 }
 
 // Handler 返回 http.Handler（外层包一层 panic 恢复中间件）。
@@ -152,6 +175,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			s.handleRewrites(w, r, parts)
 			return
 		case "settings":
+			if len(parts) == 4 && parts[2] == "tmdb" && parts[3] == "test" && r.Method == http.MethodPost {
+				s.testTMDB(w, r)
+				return
+			}
 			s.handleSettings(w, r)
 			return
 		case "play":
@@ -196,13 +223,44 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request, parts []
 			writeErr(w, http.StatusBadRequest, "请求体错误")
 			return
 		}
-		st.ID = auth.GenID("st")
-		st.CreatedAt = model.NowMillis()
+		// 同一 Base URL 已存在则视为「更新」，避免重复保存越攒越多。
+		if st.ID == "" {
+			if ex, e := s.Store.GetStorageByBaseURL(st.BaseURL); e == nil {
+				st.ID = ex.ID
+			}
+		}
+		if st.ID == "" {
+			st.ID = auth.GenID("st")
+			st.CreatedAt = model.NowMillis()
+		}
 		if st.RateLimit <= 0 {
 			st.RateLimit = s.Cfg.DefaultRate
 		}
 		_ = s.Store.SaveStorage(st)
 		writeJSON(w, st)
+	case len(parts) == 3 && r.Method == http.MethodPut:
+		// 编辑已有存储源：按 ID 更新。
+		var st model.Storage
+		if err := readJSON(r, &st); err != nil {
+			writeErr(w, http.StatusBadRequest, "请求体错误")
+			return
+		}
+		st.ID = parts[2]
+		if _, e := s.Store.GetStorage(st.ID); e != nil {
+			writeErr(w, http.StatusNotFound, "存储源不存在")
+			return
+		}
+		if st.RateLimit <= 0 {
+			st.RateLimit = s.Cfg.DefaultRate
+		}
+		_ = s.Store.SaveStorage(st)
+		writeJSON(w, st)
+	case len(parts) == 3 && r.Method == http.MethodDelete:
+		if err := s.Store.DeleteStorage(parts[2]); err != nil {
+			writeErr(w, http.StatusNotFound, "存储源不存在")
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true})
 	case len(parts) == 3 && parts[2] == "test" && r.Method == http.MethodPost:
 		s.testStorage(w, r)
 	case len(parts) == 4 && parts[2] == "drives" && r.Method == http.MethodGet:
@@ -262,6 +320,12 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 		}
 		_ = s.Store.SaveLibrary(lib)
 		writeJSON(w, lib)
+	case len(parts) == 3 && r.Method == http.MethodDelete:
+		if err := s.Store.DeleteLibrary(parts[2]); err != nil {
+			writeErr(w, http.StatusNotFound, "媒体库不存在")
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true})
 	case len(parts) == 4 && parts[3] == "items" && r.Method == http.MethodGet:
 		lib, err := s.Store.GetLibrary(parts[2])
 		if err != nil {
@@ -270,8 +334,16 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 		}
 		items, _ := s.Store.ListMediaItems(lib.ID)
 		writeJSON(w, items)
-	case len(parts) == 4 && parts[2] == "scan" && r.Method == http.MethodPost:
-		s.startScan(w, r, parts[3])
+	case len(parts) == 4 && parts[3] == "scan" && r.Method == http.MethodGet:
+		// 返回该媒体库最近一次扫描任务，供海报墙自动轮询进度。
+		job, err := s.Store.GetLatestScanJob(parts[2])
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "尚无扫描任务")
+			return
+		}
+		writeJSON(w, job)
+	case len(parts) == 4 && parts[3] == "scan" && r.Method == http.MethodPost:
+		s.startScan(w, r, parts[2])
 	default:
 		writeErr(w, http.StatusNotFound, "unknown libraries route")
 	}
@@ -300,10 +372,7 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string)
 		rate = s.Cfg.DefaultRate
 	}
 	cl := s.clientFor(st)
-	var searcher scraper.Searcher
-	if key := s.tmdbKey(); key != "" {
-		searcher = scraper.NewTMDBSearcher(key)
-	}
+	searcher := s.newSearcher()
 	// 用脱离请求的 context：避免 HTTP 响应返回后请求 ctx 被取消而中断后台扫描。
 	bg := context.Background()
 	go func() {
@@ -443,6 +512,49 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// testTMDB 用当前（或请求体里临时指定的）Key/根地址做一次真实搜索，
+// 让用户在扫描前就能确认「Key 有效 + 网络可达」，而不是扫完发现全是灰底占位图。
+//
+// 请求体可选：{"api_key":"...","api_base":"..."}；缺省则用已保存的配置。
+func (s *Server) testTMDB(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		APIKey  string `json:"api_key"`
+		APIBase string `json:"api_base"`
+	}
+	_ = readJSON(r, &body)
+	key := strings.TrimSpace(body.APIKey)
+	if key == "" {
+		key = s.tmdbKey()
+	}
+	if key == "" {
+		writeErr(w, http.StatusBadRequest, "未配置 TMDB API Key")
+		return
+	}
+	base := strings.TrimSpace(body.APIBase)
+	if base == "" {
+		base = s.tmdbBase()
+	}
+
+	c := tmdb.NewWithBase(key, base)
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	m, err := c.Search(ctx, "movie", "Inception", 2010)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "TMDB 不可用: "+err.Error())
+		return
+	}
+	if m == nil {
+		writeErr(w, http.StatusBadGateway, "TMDB 返回空结果（Key 可能受限）")
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"ok":       true,
+		"endpoint": c.ActiveBase(), // 实际生效的地址，便于用户判断是否走了备用域名
+		"sample":   m.Title,
+		"poster":   tmdb.ImageURL(m.PosterPath, "w500"),
+	})
 }
 
 // --- 播放 ---
@@ -721,10 +833,7 @@ func (s *Server) rescrapeItem(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	cl := s.clientFor(st)
-	var searcher scraper.Searcher
-	if key := s.tmdbKey(); key != "" {
-		searcher = scraper.NewTMDBSearcher(key)
-	}
+	searcher := s.newSearcher()
 	// 保留已存本地图路径；NFO 路径重新推导代价高，这里以 TMDB 兜底为主。
 	if err := scraper.Scrape(r.Context(), item, lib, s.Store, cl, searcher, "", item.PosterPath, item.BackdropPath, nil); err != nil {
 		writeErr(w, http.StatusInternalServerError, "刮削失败: "+err.Error())

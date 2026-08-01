@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,10 +22,13 @@ type Store interface {
 	SaveStorage(s model.Storage) error
 	ListStorages() ([]model.Storage, error)
 	GetStorage(id string) (model.Storage, error)
+	GetStorageByBaseURL(baseURL string) (model.Storage, error)
+	DeleteStorage(id string) error
 
 	SaveLibrary(l model.Library) error
 	ListLibraries() ([]model.Library, error)
 	GetLibrary(id string) (model.Library, error)
+	DeleteLibrary(id string) error
 
 	SaveMediaItem(m model.MediaItem) error
 	ListMediaItems(libID string) ([]model.MediaItem, error)
@@ -47,6 +51,7 @@ type Store interface {
 
 	SaveScanJob(j model.ScanJob) error
 	GetScanJob(id string) (model.ScanJob, error)
+	GetLatestScanJob(libID string) (model.ScanJob, error)
 	UpdateScanJob(j model.ScanJob) error
 
 	SaveUser(u model.User) error
@@ -182,6 +187,35 @@ func (d *db) GetStorage(id string) (model.Storage, error) {
 	return model.Storage{}, os.ErrNotExist
 }
 
+func (d *db) GetStorageByBaseURL(baseURL string) (model.Storage, error) {
+	d.mu.Lock(); defer d.mu.Unlock()
+	norm := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	for _, x := range d.Storages {
+		if strings.TrimRight(strings.TrimSpace(x.BaseURL), "/") == norm {
+			return x, nil
+		}
+	}
+	return model.Storage{}, os.ErrNotExist
+}
+
+func (d *db) DeleteStorage(id string) error {
+	d.mu.Lock(); defer d.mu.Unlock()
+	out := d.Storages[:0]
+	found := false
+	for _, x := range d.Storages {
+		if x.ID == id {
+			found = true
+			continue
+		}
+		out = append(out, x)
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	d.Storages = out
+	return d.flush()
+}
+
 func (d *db) SaveLibrary(l model.Library) error {
 	d.mu.Lock(); defer d.mu.Unlock()
 	for i, x := range d.Libraries {
@@ -204,6 +238,24 @@ func (d *db) GetLibrary(id string) (model.Library, error) {
 	return model.Library{}, os.ErrNotExist
 }
 
+func (d *db) DeleteLibrary(id string) error {
+	d.mu.Lock(); defer d.mu.Unlock()
+	out := d.Libraries[:0]
+	found := false
+	for _, x := range d.Libraries {
+		if x.ID == id {
+			found = true
+			continue
+		}
+		out = append(out, x)
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	d.Libraries = out
+	return d.flush()
+}
+
 func (d *db) SaveMediaItem(m model.MediaItem) error {
 	d.mu.Lock(); defer d.mu.Unlock()
 	for i, x := range d.Items {
@@ -213,11 +265,16 @@ func (d *db) SaveMediaItem(m model.MediaItem) error {
 	return d.flush()
 }
 
-// UpsertMediaItemByTitle 按 标题+年份 去重，剧集合集不重复建。
+// UpsertMediaItemByTitle 按 ID 或 标题+年份 去重，剧集合集不重复建。
+//
+// 必须先按 ID 匹配：条目被刮削后标题会变成 TMDB 的官方名（如「将夜」→「将夜 第一季」），
+// 此后再扫同一部剧，按标题就再也匹配不上，会 append 出一条同 ID 的重复记录——
+// 表现为海报墙上同一部剧出现两个方块，其中一个永远没有海报。
 func (d *db) UpsertMediaItemByTitle(m model.MediaItem) error {
 	d.mu.Lock(); defer d.mu.Unlock()
 	for i, x := range d.Items {
-		if x.Title == m.Title && x.Year == m.Year && x.LibraryID == m.LibraryID {
+		sameID := m.ID != "" && x.ID == m.ID
+		if sameID || (x.Title == m.Title && x.Year == m.Year && x.LibraryID == m.LibraryID) {
 			// 保留更完整的元数据（本地图路径优先保留已存在的）
 			if m.TMDBID != 0 { x.TMDBID = m.TMDBID }
 			if m.Overview != "" { x.Overview = m.Overview }
@@ -242,7 +299,7 @@ func (d *db) UpsertMediaItemByTitle(m model.MediaItem) error {
 
 func (d *db) ListMediaItems(libID string) ([]model.MediaItem, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
-	var out []model.MediaItem
+	out := []model.MediaItem{}
 	for _, x := range d.Items {
 		if x.LibraryID == libID { out = append(out, x) }
 	}
@@ -268,7 +325,7 @@ func (d *db) SaveMediaFile(f model.MediaFile) error {
 
 func (d *db) ListMediaFiles(itemID string) ([]model.MediaFile, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
-	var out []model.MediaFile
+	out := []model.MediaFile{}
 	for _, x := range d.Files {
 		if x.ItemID == itemID { out = append(out, x) }
 	}
@@ -330,7 +387,7 @@ func (d *db) GetPlayRecord(userID, fileID string) (model.PlayRecord, error) {
 // ListContinue 返回有进度但未看完的播放记录（继续观看）。
 func (d *db) ListContinue(userID string) ([]model.PlayRecord, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
-	var out []model.PlayRecord
+	out := []model.PlayRecord{}
 	for _, x := range d.Records {
 		if x.UserID == userID && x.Duration > 0 && x.Position > 0 && x.Position < x.Duration-30 {
 			out = append(out, x)
@@ -352,7 +409,7 @@ func (d *db) SaveFavorite(f model.Favorite) error {
 
 func (d *db) ListFavorites(userID string) ([]model.Favorite, error) {
 	d.mu.Lock(); defer d.mu.Unlock()
-	var out []model.Favorite
+	out := []model.Favorite{}
 	for _, x := range d.Favorites {
 		if x.UserID == userID { out = append(out, x) }
 	}
@@ -374,6 +431,26 @@ func (d *db) GetScanJob(id string) (model.ScanJob, error) {
 		if x.ID == id { return x, nil }
 	}
 	return model.ScanJob{}, os.ErrNotExist
+}
+
+// GetLatestScanJob 返回某媒体库最近一次（StartedAt 最大）的扫描任务。
+func (d *db) GetLatestScanJob(libID string) (model.ScanJob, error) {
+	d.mu.Lock(); defer d.mu.Unlock()
+	var best model.ScanJob
+	found := false
+	for _, x := range d.Jobs {
+		if x.LibraryID != libID {
+			continue
+		}
+		if !found || x.StartedAt > best.StartedAt {
+			best = x
+			found = true
+		}
+	}
+	if !found {
+		return model.ScanJob{}, os.ErrNotExist
+	}
+	return best, nil
 }
 
 func (d *db) UpdateScanJob(j model.ScanJob) error { return d.SaveScanJob(j) }
