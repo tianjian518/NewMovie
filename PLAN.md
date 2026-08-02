@@ -362,6 +362,8 @@ NewMovie 的处理是：**strm 解析出来的资源，和原生挂载的资源�
 
 `https://github.com/tianjian518/139cas` 已确认是 OpenList 的 rebrand（加了广哑盘驱动 + `.cas` 真实文件预览）。**签名算法继承自原版 OpenList**，NewMovie 的 `openlist.Sign()` 与其一致，无需改动即可对接。`.cas` 文件（`/d/*.cas`、`/p/*.cas`）的 CAS 预览能力作为 **Phase 4** 的 fork 专属模式后续接入。
 
+> **v1.1.15 已解决 `.cas` 页内播放**：`.cas` 经 OpenList 取链返回的 `raw_url` 本身就是 `/d/...cas?sign=` 这种 OpenList 中转直链（自身 302 即跳真实网盘解密流，如天翼云盘 `ctyunxs.cn`），remux/转码端点拿着它就能产出 MP4。当 `playItem` 用内部路径重新取链失败（编码对不上 / 模板占位符 / 签名态异常）时，**直接回退用原始 `StrmRaw` 直链**，根除「网盘直链为空（502）」，用户零配置。
+
 ---
 
 ## 八、功能清单与阶段划分
