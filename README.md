@@ -1,8 +1,32 @@
 # NewMovie · 云盘媒体库播放器
 
-> 一个自托管的媒体服务器：直接对接 **OpenList** 把网盘当硬盘，自动刮削成**海报墙**，点开就能播，记得你看到哪儿。后端零外部依赖、单二进制；前端 React + Vite。
+> 一个自托管的媒体服务器：网盘当硬盘，自动刮削成**海报墙**，点开就能播，记得你看到哪儿。
+> **2.0 起内置 [139cas](https://github.com/tianjian518/139cas) 网盘后端 —— 一个容器就是全部。**
 
-NewMovie 把「OpenList 挂载网盘 → 扫描 → 海报墙 → 播放 → 进度/收藏」压缩进**一个容器**，不必再拼 OpenList + strm 生成 + Emby 扫描 + MediaWarp 劫持 302 + Nginx 反代那一套。
+NewMovie 把「挂载网盘 → 扫描 → 海报墙 → 播放 → 进度/收藏」压缩进**一个容器**，不必再拼 OpenList + strm 生成 + Emby 扫描 + MediaWarp 劫持 302 + Nginx 反代那一套。
+
+---
+
+## 2.0：与 139cas 合体
+
+1.x 需要你先自己部署 OpenList、去后台复制 Token、再回来手填地址和签名密钥。
+2.0 把 139cas 直接打进镜像，这些步骤全部消失：
+
+```
+┌─────────────── 容器 newmovie:2.0 ────────────────┐
+│  supervisord                                     │
+│   ├─ openlist(139cas)  127.0.0.1:5244  ← 不对外  │
+│   └─ newmovie          0.0.0.0:8096    ← 唯一入口 │
+│        /openlist/*  ──反向代理──▶ 127.0.0.1:5244  │
+└──────────────────────────────────────────────────┘
+```
+
+NewMovie 启动后**自动**登录内置后端、取 Token 与签名密钥、注册成默认存储。
+用户要做的只有两步：`:8096/openlist/` 加网盘 → 回 `:8096` 建媒体库。
+
+想继续用外部 OpenList？设 `NEWMOVIE_BUNDLED=0`，行为与 1.x 完全一致。
+
+详见 [`NewMovie_2.0_发布清单.md`](./NewMovie_2.0_发布清单.md)。
 
 ---
 
@@ -43,17 +67,29 @@ NewMovie 的立场（详见 [`PLAN.md`](./PLAN.md)）：
 ## 快速开始（Docker）
 
 ```bash
-# 1) 修改 docker-compose.yml 里的镜像名 yourname → 你的 Docker Hub 用户名
-# 2) 启动
 docker compose up -d
 
-# 3) 打开 http://<你的IP>:8096 ，默认管理员 admin / admin（请立即改密码）
+# 1) http://<你的IP>:8096/openlist/   —— 网盘挂载管理（内置 139cas）
+#    用 admin + ./data/openlist_admin_pass 里的密码登录，添加你的网盘
+# 2) http://<你的IP>:8096/            —— 媒体库与播放器
+#    用 VIDRIVE_ADMIN_PASS 登录，建媒体库、扫描、点开即播
 ```
 
-首次进入「设置」：
-1. 添加 OpenList 存储源（Base URL 填 `http://openlist:5244`，同 Docker 网络用容器名；**不要填 localhost**），点「测试连接」应列出已挂载网盘。
-2. 创建媒体库（选原生模式，填 OpenList 内部路径如 `/115_open/Video`），点「扫描」。
-3. 回到首页海报墙，点开即播。
+内置网盘的存储条目由 NewMovie **自动注册**，不需要手填地址、Token 和签名密钥。
+侧栏「网盘挂载」入口上的状态点：绿色=已接管，琥珀色脉冲=后端还在启动。
+
+### 自行构建镜像
+
+```bash
+docker build -t newmovie:2.0 .
+
+# 访问 dl-cdn.alpinelinux.org / proxy.golang.org / registry.npmjs.org 受限时，换镜像源：
+docker build \
+  --build-arg APK_MIRROR=https://mirrors.tencent.com/alpine \
+  --build-arg GOPROXY=https://mirrors.tencent.com/go/,direct \
+  --build-arg NPM_REGISTRY=https://mirrors.tencent.com/npm/ \
+  -t newmovie:2.0 .
+```
 
 ---
 
@@ -67,6 +103,19 @@ docker compose up -d
 | `VIDRIVE_ADMIN_PASS` | `admin` | 管理员密码（**生产务必修改**） |
 | `VIDRIVE_SCAN_RATE` | `2` | 全局默认扫描限速（req/s，风控友好） |
 | `TMDB_API_KEY` | _(空)_ | TMDB API Key；**留空则跳过 TMDB**，仅靠 NFO（同目录 `.nfo` / 本地图）与文件名识别刮削。也可在「设置」页填入并持久化（环境变量优先） |
+
+### 2.0 内置网盘
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `NEWMOVIE_BUNDLED` | 镜像内 `1` | 是否启用内置 139cas 后端。设 `0` 退回 1.x 的外部 OpenList 模式 |
+| `NEWMOVIE_BUNDLED_URL` | `http://127.0.0.1:5244` | 内置后端地址 |
+| `NEWMOVIE_BUNDLED_NAME` | `内置网盘` | 自动注册的存储名（可在界面改，重启不覆盖） |
+| `NEWMOVIE_BUNDLED_TOKEN` | _(空)_ | 显式 Token，配了就跳过自动登录 |
+| `NEWMOVIE_BUNDLED_USER` | `admin` | 内置后端管理员用户名 |
+| `NEWMOVIE_BUNDLED_PASS` | _(空)_ | 内置后端管理员密码。不填则首启随机生成并写入 `/data/openlist_admin_pass` |
+| `NEWMOVIE_BUNDLED_TIMEOUT` | `90s` | 单轮就绪等待上限（失败后仍会每 30s 重试） |
+| `NEWMOVIE_BUNDLED_PROXY` | 跟随 `BUNDLED` | 是否开启 `/openlist/` 反向代理 |
 
 ---
 

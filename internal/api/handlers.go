@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -145,6 +146,25 @@ func getToken(r *http.Request) string {
 		return strings.TrimPrefix(h, "Bearer ")
 	}
 	return r.URL.Query().Get("token")
+}
+
+// appendToken 给内部媒体 URL 附上 ?token=。
+//
+// 浏览器的 <video src>、<track src> 由浏览器自己发起请求，**没有任何办法带上
+// Authorization 头**。而 /api/play/remux、/api/play/transcode、/api/play/subtitle
+// 都要求鉴权，于是页内播放会直接 401 黑屏 —— 用 Go 客户端做的 E2E 因为手动设了
+// header，恰好绕过了这个坑，属于典型的「测试通过但用户用不了」。
+//
+// 后端 getToken 本就支持 ?token= 兜底，这里在下发 URL 时补上即可，前端零改动。
+func appendToken(u, tok string) string {
+	if u == "" || tok == "" || strings.Contains(u, "token=") {
+		return u
+	}
+	sep := "?"
+	if strings.Contains(u, "?") {
+		sep = "&"
+	}
+	return u + sep + "token=" + url.QueryEscape(tok)
 }
 
 func (s *Server) requireUser(r *http.Request) (model.User, bool) {
@@ -1620,6 +1640,10 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 			}
 			// 重封装/转码流无法可靠响应 Range，页内从头播即可（fragmented mp4 仍可拖）。
 			dec.SupportsRange = false
+			// 关键：<video src> 由浏览器直接发起，**无法携带 Authorization 头**，
+			// 于是 /api/play/remux 会 401、页面一片黑。后端本就支持 ?token= 兜底
+			// （见 getToken），这里在下发的 URL 上直接带上，前端零改动即可播。
+			dec.URL = appendToken(dec.URL, getToken(r))
 		} else {
 			// 拿不到源地址：明确报错，而不是静默返回空 URL（否则前端 ArtPlayer 报「视频不存在」）。
 			writeErr(w, http.StatusBadGateway,
@@ -1649,12 +1673,13 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	}
 
 	// 字幕列表：每条带语言、显示名与后端转换服务的 URL。
+	// 字幕同理：ArtPlayer 用 fetch/track 加载，同样带不上 Authorization。
 	subs := make([]map[string]string, 0, len(f.Subtitles))
 	for _, s2 := range f.Subtitles {
 		subs = append(subs, map[string]string{
 			"lang":  s2.Lang,
 			"title": s2.Title,
-			"url":   "/api/play/subtitle?file=" + fileID + "&lang=" + s2.Lang,
+			"url":   appendToken("/api/play/subtitle?file="+fileID+"&lang="+s2.Lang, getToken(r)),
 		})
 	}
 

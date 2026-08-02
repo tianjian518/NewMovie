@@ -8,9 +8,22 @@
 # 用户跑 `docker run -p 8096:8096` 就能得到完整的「网盘 + 刮削 + 播放」，
 # 不用再单独部署 OpenList、不用复制 Token。
 
+# 构建期镜像源（可选）：默认留空走官方源，行为与常规构建一致。
+# 在访问 dl-cdn.alpinelinux.org / proxy.golang.org / registry.npmjs.org 受限的网络里，
+# 用下面三个 ARG 换成国内镜像即可，例如：
+#   docker build \
+#     --build-arg APK_MIRROR=https://mirrors.tencent.com/alpine \
+#     --build-arg GOPROXY=https://mirrors.tencent.com/go/,direct \
+#     --build-arg NPM_REGISTRY=https://mirrors.tencent.com/npm/ .
+ARG APK_MIRROR=
+ARG GOPROXY=
+ARG NPM_REGISTRY=
+
 # ---- 阶段 1：NewMovie 前端构建 ----
 # 固定在构建机原生平台执行（产物为 JS/CSS，与架构无关），避免在每个目标架构下重复用 QEMU 跑 node。
 FROM --platform=$BUILDPLATFORM node:22-alpine AS web
+ARG NPM_REGISTRY
+RUN [ -n "$NPM_REGISTRY" ] && npm config set registry "$NPM_REGISTRY" || true
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
@@ -23,7 +36,11 @@ RUN npm run build
 # 这里单独下载以便利用镜像层缓存。
 FROM --platform=$BUILDPLATFORM alpine:3.20 AS olweb
 ARG OPENLIST_WEB_VERSION=v4.1.3
-RUN apk add --no-cache curl tar
+ARG APK_MIRROR
+RUN if [ -n "$APK_MIRROR" ]; then \
+      printf '%s/v3.20/main\n%s/v3.20/community\n' "$APK_MIRROR" "$APK_MIRROR" > /etc/apk/repositories; \
+    fi; \
+    apk add --no-cache curl tar
 WORKDIR /dist
 RUN set -eux; \
     url="https://github.com/OpenListTeam/OpenList-Frontend/releases/download/${OPENLIST_WEB_VERSION}/openlist-frontend-dist-${OPENLIST_WEB_VERSION}.tar.gz"; \
@@ -36,7 +53,13 @@ FROM golang:1.24-alpine AS openlist
 WORKDIR /src
 ARG TARGETARCH
 ARG TARGETVARIANT
-RUN apk add --no-cache git
+ARG APK_MIRROR
+ARG GOPROXY
+RUN if [ -n "$APK_MIRROR" ]; then \
+      V=$(cut -d. -f1,2 /etc/alpine-release); \
+      printf '%s/v%s/main\n%s/v%s/community\n' "$APK_MIRROR" "$V" "$APK_MIRROR" "$V" > /etc/apk/repositories; \
+    fi; \
+    apk add --no-cache git
 COPY openlist/go.mod openlist/go.sum ./
 RUN go mod download
 COPY openlist/ ./
@@ -52,6 +75,7 @@ FROM golang:1.23-alpine AS backend
 WORKDIR /src
 ARG TARGETARCH
 ARG TARGETVARIANT
+ARG GOPROXY
 COPY go.mod ./
 RUN go mod download || true
 # openlist/ 是独立 Go 模块，不参与主模块构建，排除掉可以少传几 MB 上下文。
@@ -69,7 +93,11 @@ FROM alpine:3.20 AS run
 # ffmpeg 用于 /api/play/remux 实时重封装（MKV 等容器转 MP4），让页内播放不再依赖外部播放器。
 # supervisor 负责在同一容器里管住 openlist 与 newmovie 两个进程。
 # python3 仅用于 entrypoint 里安全地改写 OpenList 的 config.json（sed 改 JSON 太脆）。
-RUN apk add --no-cache ca-certificates tzdata wget ffmpeg supervisor python3
+ARG APK_MIRROR
+RUN if [ -n "$APK_MIRROR" ]; then \
+      printf '%s/v3.20/main\n%s/v3.20/community\n' "$APK_MIRROR" "$APK_MIRROR" > /etc/apk/repositories; \
+    fi; \
+    apk add --no-cache ca-certificates tzdata wget ffmpeg supervisor python3
 WORKDIR /app
 COPY --from=backend /out/newmovie /app/newmovie
 COPY --from=openlist /out/openlist /app/openlist/openlist
