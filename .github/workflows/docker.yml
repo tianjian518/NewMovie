@@ -35,6 +35,9 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"   # 去掉前缀 v，得到 1.1.0（与手动推送的 1.0.0 约定一致）
             TAGS="${TAGS},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:${VERSION}"
           fi
+          # :full 是含 FFmpeg 完整镜像的别名（与 :latest 同一镜像）；
+          # 历史文档/用户心智里提到的「:full 镜像」即此，确保引用仍可用。
+          TAGS="${TAGS},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:full"
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - name: Build and push

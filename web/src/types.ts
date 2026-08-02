@@ -63,6 +63,11 @@ export interface PlayDecision {
   supports_range: boolean;
   headers: Record<string, string>;
   needs_transcode: boolean;
+  // ffmpeg_ok：服务端是否安装了 ffmpeg。重封装/转码依赖它；缺失时 MKV/HEVC
+  // 只能外部播放，后端会在 warn 里给出明确的换镜像提示。
+  ffmpeg_ok: boolean;
+  // warn：非致命但需提示用户的信息（如服务端未安装 ffmpeg）。
+  warn: string;
   // 续播：上次看到的位置（秒），0 表示从头开始
   resume_position: number;
   resume_duration: number;

@@ -18,6 +18,12 @@ export default function Library() {
 
   const loadLibs = () => api.listLibraries().then(setLibs).catch(() => {});
   useEffect(() => { loadLibs(); }, []);
+
+  // 全局横幅：服务端缺少 ffmpeg 时，MKV/HEVC 无法页内播放，提前告知用户换镜像。
+  const [ffmpegOk, setFfmpegOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    api.health().then((h) => setFfmpegOk(!!h.ffmpeg_ok)).catch(() => {});
+  }, []);
   useEffect(() => {
     api.listStorages().then((s) => {
       setStorages(s);
@@ -71,6 +77,12 @@ export default function Library() {
 
   return (
     <div>
+      {ffmpegOk === false && (
+        <div className="mb-4 bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 text-sm text-amber-200">
+          ⚠️ 服务端未安装 <b>ffmpeg</b>：MKV / HEVC / 4K 等资源无法页内播放，只能唤起外部播放器。
+          请重新部署含 ffmpeg 的镜像（<code className="bg-black/30 px-1 rounded">tianjian518/newmovie:latest</code> 已含 ffmpeg）。
+        </div>
+      )}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold">媒体库</h2>
         <button onClick={() => setShowForm((v) => !v)} className="bg-brand rounded px-3 py-1 text-sm">

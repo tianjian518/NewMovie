@@ -15,8 +15,8 @@ type Level int
 const (
 	L0Direct    Level = iota // 302 直链（零服务端开销）
 	L1Proxy                  // 代理转发（补防盗链 header）
-	L2Remux                  // 重封装 -c copy（修正容器不兼容）
-	L3Transcode              // 真转码（资源黑洞，默认关）
+	L2Remux                  // 重封装 -c copy（修正容器不兼容 / 音轨）
+	L3Transcode              // 真转码（HEVC→H.264，人人可播）
 	L4External               // 唤起外部播放器
 )
 
@@ -30,7 +30,15 @@ type Input struct {
 	HotlinkProtection bool   // 是否有防盗链（需补 UA/Referer）
 	SupportsRange     bool   // 源是否支持 Range（影响拖动）
 	TranscodeEnabled  bool   // 是否允许 L3 转码
-	PreferExternal    bool   // 用户偏好外部播放器
+	// TranscodeAvailable 服务端是否真的能转码：ffmpeg 在且带 libx264 编码器。
+	// 仅 TranscodeEnabled 不够——若 ffmpeg 构建缺 libx264，转码会静默失败（空 200）。
+	// 缺时不应走 L3，改 L2 重封装保留 HEVC（HEVC 能力浏览器可播）或 L4 外部。
+	TranscodeAvailable bool
+	// FFmpegAvailable 服务端是否安装了 ffmpeg。重封装(L2)/转码(L3)都依赖它；
+	// 缺失时这两项无法实现，调用方应据此把本要走 L2/L3 的文件降级为 L4 外部播放器，
+	// 而不是返回一个 500 报错让用户对着「视频不存在」发懵。
+	FFmpegAvailable bool
+	PreferExternal   bool // 用户偏好外部播放器
 }
 
 // Decision 决策结果（前端据此显示小标签）。
@@ -49,9 +57,14 @@ type Decision struct {
 
 // 浏览器原生支持的白名单（保守，见 PLAN.md 第六节）。
 var (
+	// nativeContainers：浏览器「认识并能播放」的容器。mp4/webm/mov 直接 <video> 能播，
+	// 不需要服务端重封装——重封装一个 mp4 成另一个 mp4 毫无意义（反而还要 ffmpeg、还更慢）。
 	nativeContainers = map[string]bool{"mp4": true, "webm": true, "mov": true}
-	nativeVideo      = map[string]bool{"h264": true, "avc": true, "vp9": true, "av1": true}
-	nativeAudio      = map[string]bool{"aac": true, "mp3": true, "opus": true}
+	// containerNeedsRemux：浏览器「根本不认」的容器，必须重封装成 MP4 才能页内播。
+	// 这是 MKV / TS 类文件页内播放的唯一出路（浏览器读不了 MKV 容器）。
+	containerNeedsRemux = map[string]bool{"mkv": true, "ts": true, "m2ts": true, "flv": true}
+	nativeVideo          = map[string]bool{"h264": true, "avc": true, "vp9": true, "av1": true}
+	nativeAudio          = map[string]bool{"aac": true, "mp3": true, "opus": true}
 )
 
 // 可无损重封装（ffmpeg -c copy 换个壳）页内播放的编码/容器。
@@ -70,10 +83,6 @@ var (
 		"h265": true, "hevc": true,
 	}
 	remuxAudio = map[string]bool{"aac": true, "mp3": true, "opus": true, "ac3": true, "eac3": true}
-	// 这些容器「编码本身浏览器能解」但原容器浏览器不认，可被 -c copy 塞进 MP4。
-	// mp4/mov 也纳入：当里面是 HEVC 时（浏览器原生白名单不含 h265），
-	// 走一次同封装重混流即可在页内尝试播放，避免无谓地甩外部。
-	remuxContainers = map[string]bool{"mkv": true, "ts": true, "m2ts": true, "flv": true, "mp4": true, "mov": true}
 	// 可视频转码（重编码为 H.264）的编码与容器。转码是 CPU 黑洞，仅当浏览器真解不了
 	// （如 HEVC）且用户开「允许视频转码」时才走。列表尽量宽：老编码/冷门容器都兜住。
 	// 注意：HEVC(h265) 故意不进 nativeVideo（多数浏览器不解码），但进这里——开启转码后
@@ -94,6 +103,12 @@ var (
 func norm(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // Select 选择播放策略。
+//
+// 核心原则（也回应了 v1.1.13 把 mp4 误送重封装导致 HEVC-in-MP4 报错的回归）：
+//   - 重封装(L2) 只用于「修容器不兼容」或「修音轨不兼容」，绝不用于「让本就解不了的视频变可解」。
+//     原生容器(mp4/mov/webm)里的 HEVC，重封装成 mp4 浏览器照样解不了，必须转码(L3)或外部(L4)。
+//   - 没有 ffmpeg 时，L2/L3 都不可行，凡是需要它们的文件一律降级为 L4 外部播放器并给出明确原因，
+//     而不是返回一个 500 让用户对着「视频不存在」发懵。
 func Select(in Input) Decision {
 	c := norm(in.Container)
 	vc := norm(in.VideoCodec)
@@ -109,13 +124,13 @@ func Select(in Input) Decision {
 
 	browserNative := nativeContainers[c] && nativeVideo[vc] && nativeAudio[ac]
 
+	// 浏览器原生支持：零开销直链（有防盗链则代理补 header）。
 	if browserNative {
 		if in.HotlinkProtection {
 			url := pickURL(in)
 			return Decision{Level: L1Proxy, Label: "代理", Reason: "有防盗链，服务端补 header 转发",
 				URL: proxyPath(url), UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
 		}
-		// 直链：raw_url 优先（绕开 OpenList 中转）
 		useRaw := in.RawURL != ""
 		url := in.RawURL
 		if url == "" {
@@ -125,15 +140,23 @@ func Select(in Input) Decision {
 			URL: url, UseRawURL: useRaw, SupportsRange: in.SupportsRange}
 	}
 
-	// 浏览器能直接解的视频编码（在 <video> 里原生播）：h264/avc/vp9/av1。
-	// HEVC(h265) 故意不在此列——多数 Firefox / 多数 Chrome 不带 HEVC 解码器，
-	// 即便重封装成 MP4 也放不出（这正是用户报「视频不存在」的根因）。
-	browserDecodableVideo := nativeVideo[vc]
-	containerRemuxable := remuxContainers[c]
+	// 没有 ffmpeg：重封装/转码都做不了。到这里的都不是 browserNative，只能外部播放器。
+	// 给出人话原因，前端据此提示用户「用含 ffmpeg 的镜像」。
+	if !in.FFmpegAvailable {
+		return Decision{Level: L4External, Label: "外部",
+			Reason: "服务端未安装 ffmpeg，MKV/HEVC 等需重封装/转码才能页内播，已唤起外部播放器（请部署含 ffmpeg 的镜像）",
+			SupportsRange: in.SupportsRange}
+	}
 
-	// 1) 容器不兼容，但视频编码浏览器能解（h264/vp9/av1 等）→ L2 重封装，
-	//    音轨按需转 AAC（DTS/TrueHD 等装不进 MP4 的情况）。
-	if containerRemuxable && browserDecodableVideo {
+	nativeC := nativeContainers[c]       // mp4/mov/webm：浏览器认容器
+	needFix := containerNeedsRemux[c]    // mkv/ts/m2ts/flv：浏览器不认，必须重封装
+	decodable := nativeVideo[vc]         // h264/vp9/av1：浏览器能解视频
+	audioOK := nativeAudio[ac]           // aac/mp3/opus：浏览器原生音轨
+
+	// 1) 容器浏览器不认、但视频它能解（h264/vp9/av1 在 MKV/TS 里）→ L2 重封装：
+	//    换容器即可页内播；音轨按需转 AAC（DTS/TrueHD 等装不进 MP4 的情况）。
+	//    这是 MKV+h264 秒播的主路径。
+	if needFix && decodable {
 		if remuxAudio[ac] {
 			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码浏览器可解，服务端 -c copy 重封装为 MP4",
 				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
@@ -142,26 +165,38 @@ func Select(in Input) Decision {
 			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
 	}
 
-	// 2) 视频编码浏览器解不了（HEVC 等），但开启了转码且可转 → L3 视频转码
-	//    （HEVC→H.264 + 音轨 AAC），产物是任何浏览器都能播的 MP4，彻底解决页内播放。
-	if in.TranscodeEnabled && transcodableVideo[vc] && transcodableContainers[c] {
-		return Decision{Level: L3Transcode, Label: "转码", Reason: "编码浏览器不支持（如 HEVC），服务端转码为 H.264",
-			URL: "", UseRawURL: in.RawURL != "", NeedsTranscode: true, SupportsRange: in.SupportsRange}
-	}
-
-	// 3) 视频编码可重封装但浏览器解不了（HEVC 等）→ 仍走 L2 重封装：
-	//    HEVC 能力浏览器（Safari、带 HEVC 扩展的 Chrome）可直接页内播。
-	//    仅当未开转码时落到这里；开了转码已在第 2 步优先转码。
-	if containerRemuxable && remuxVideo[vc] {
-		if remuxAudio[ac] {
-			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4",
-				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
-		}
-		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（DTS/TrueHD 等不兼容 MP4）",
+	// 2) 原生容器、视频浏览器能解、但音轨不兼容（h264+DTS 装进 MP4 的怪胎）→ L2 重封装，
+	//    仅把音轨转 AAC，视频原样拷贝。注意：这里仅针对「容器本就认」的情形，
+	//    绝不会把 HEVC-in-MP4 误送进来（那种视频浏览器解不了，留给第 3/4 步）。
+	if nativeC && decodable && !audioOK {
+		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（音轨不兼容原生容器）",
 			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
 	}
 
-	// 4) 兜底：外部播放器（绝不给用户一句"不支持"）。
+	// 3) 视频编码浏览器解不了（HEVC 等）且开启了转码、且服务端真能转码（带 libx264）
+	//    → L3 视频转码（HEVC→H.264 + 音轨 AAC）。产物是任何浏览器都能播的 MP4，
+	//    彻底解决页内播放——这是「无论什么 strm 都能播」的通用路径。
+	//    无论容器是 MKV 还是 MP4，只要视频解不了，就走这里（而非把 MP4+HEVC 误送重封装）。
+	//    注意：必须 TranscodeAvailable（libx264 在）。若 ffmpeg 缺 libx264，转码会静默失败，
+	//    此时跳过本步，落到第 4 步（MKV 保留 HEVC 重封装）或第 5 步（外部）。
+	if in.TranscodeEnabled && in.TranscodeAvailable && transcodableVideo[vc] && transcodableContainers[c] {
+		return Decision{Level: L3Transcode, Label: "转码", Reason: "编码浏览器不支持（如 HEVC），服务端转码为 H.264 人人可播",
+			URL: "", UseRawURL: in.RawURL != "", NeedsTranscode: true, SupportsRange: in.SupportsRange}
+	}
+
+	// 4) 容器浏览器不认、视频可重封装但解不了（HEVC 在 MKV/TS 里）、且未开转码 → 仍走 L2 重封装：
+	//    保留 HEVC，给带 HEVC 解码器的浏览器（Safari、部分 Chrome）页内播的机会。
+	//    （原生容器里的 HEVC 不会进这里——needFix 为 false——直接落到底部外部播放器。）
+	if needFix && remuxVideo[vc] {
+		if remuxAudio[ac] {
+			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4（需浏览器支持 HEVC）",
+				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
+		}
+		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（需浏览器支持 HEVC）",
+			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
+	}
+
+	// 5) 兜底：外部播放器（绝不给用户一句"不支持"）。
 	return Decision{Level: L4External, Label: "外部",
 		Reason: "编码不支持且未开启转码，唤起外部播放器", SupportsRange: in.SupportsRange}
 }
@@ -200,5 +235,5 @@ func proxyPath(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	return "/api/play/proxy?u=" + raw
+	return "/api/play/proxy?u=" + url.QueryEscape(raw)
 }

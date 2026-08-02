@@ -66,36 +66,68 @@ function TmdbPanel() {
   );
 }
 
-// 视频转码开关：默认关（转码是 CPU 黑洞）。开启后，浏览器本身解不了的编码
-// （如 HEVC/H.265，多数 Firefox / 多数 Chrome 不带解码器）会被服务端转成 H.264 页内播，
-// 解决「MKV 点开提示视频不存在 / 只能外部播放器」的问题。持久化到 transcode_enabled。
+// 视频转码开关 + ffmpeg 状态。ffmpeg 是重封装/转码的基础；
+// 服务端装了 ffmpeg 时转码默认开启（HEVC 也能页内播），用户可在此关闭以省 CPU。
+// 服务端没装 ffmpeg：重封装/转码都不可用，MKV/HEVC 只能外部播放，这里给出明确提示。
 function TranscodePanel() {
   const [on, setOn] = useState(false);
+  const [ffmpegOk, setFfmpegOk] = useState<boolean | null>(null);
+  const [transcodeOk, setTranscodeOk] = useState<boolean | null>(null);
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
-    api.getSettings().then((s) => setOn(s["transcode_enabled"] === "1")).catch(() => {});
+    // 有效状态 = 用户设置（transcode_enabled）优先，否则取服务端默认（ffmpeg+libx264 在则默认开）。
+    Promise.all([api.getSettings(), api.health()])
+      .then(([s, h]) => {
+        setFfmpegOk(!!h.ffmpeg_ok);
+        setTranscodeOk(!!h.transcode_ok);
+        setOn(s["transcode_enabled"] === "1" || (s["transcode_enabled"] == null && !!h.transcode));
+      })
+      .catch(() => {});
   }, []);
+
+  // 转码可用 = ffmpeg 在且带 libx264。缺 libx264 时勾选无意义，禁用并提示。
+  const canTranscode = ffmpegOk === true && transcodeOk === true;
 
   async function toggle() {
     const next = !on;
     setOn(next);
     await api.saveSettings({ transcode_enabled: next ? "1" : "0" });
-    setMsg(next ? "已开启：HEVC 等编码将转成 H.264 页内播放（更吃 CPU）" : "已关闭：恢复轻量重封装，HEVC 仅 HEVC 能力浏览器可播");
+    setMsg(next
+      ? "已开启：HEVC 等编码将转成 H.264 页内播放（更吃 CPU，但任何浏览器都能播）"
+      : "已关闭：恢复「仅 HEVC 能力浏览器可播」的轻量重封装");
   }
 
   return (
     <section>
       <h2 className="text-xl font-bold mb-3">视频转码（页内播放兜底）</h2>
       <div className="bg-card rounded-lg p-4 space-y-3 max-w-xl">
+        <div className="flex items-center gap-2 text-sm">
+          <span className={"inline-block w-2.5 h-2.5 rounded-full " + (ffmpegOk ? "bg-green-400" : ffmpegOk === false ? "bg-red-400" : "bg-gray-500")} />
+          <span className="text-gray-300">
+            {ffmpegOk === null ? "检测服务端能力中…" : ffmpegOk ? "ffmpeg 已就绪：重封装可用" + (transcodeOk ? "，转码可用" : "，但缺少 libx264（转码不可用）") : "ffmpeg 未安装：MKV / HEVC 只能唤起外部播放器"}
+          </span>
+        </div>
+        {ffmpegOk === false && (
+          <p className="text-sm text-amber-200 bg-amber-500/10 border border-amber-500/40 rounded p-3">
+            服务端缺少 ffmpeg，重封装 / 转码均不可用。请重新部署含 ffmpeg 的镜像
+            （<code className="bg-black/30 px-1 rounded">tianjian518/newmovie:latest</code> 已含 ffmpeg）后，MKV / HEVC 即可页内播放。
+          </p>
+        )}
+        {ffmpegOk === true && transcodeOk === false && (
+          <p className="text-sm text-amber-200 bg-amber-500/10 border border-amber-500/40 rounded p-3">
+            ffmpeg 缺少 libx264 编码器，视频转码（HEVC→H.264）不可用。HEVC 内容将走重封装保留 HEVC
+            （仅 HEVC 能力浏览器可播）。请换含 libx264 的 ffmpeg 构建以启用通用转码。
+          </p>
+        )}
         <label className="flex items-start gap-3 cursor-pointer">
-          <input type="checkbox" className="mt-1" checked={on} onChange={toggle} />
+          <input type="checkbox" className="mt-1" checked={on} onChange={toggle} disabled={!canTranscode} />
           <span>
             <span className="font-medium">允许视频转码（HEVC→H.264）</span>
             <p className="text-sm text-gray-400 mt-1">
-              MKV/4K 蓝光原盘多为 HEVC，多数浏览器解不了 → 重封装后仍放不出。
-              开启后服务端实时转成 H.264，任何浏览器都能页内播；代价是更吃 CPU。
-              仅在遇到「视频不存在 / 无法播放」时再开。
+              网盘里的 MKV / 4K 蓝光原盘多为 HEVC，多数浏览器（尤其 Firefox、多数 Chrome）解不了 → 重封装后仍放不出。
+              开启后服务端实时转成 H.264，<b>任何浏览器都能页内播</b>；代价是更吃 CPU（4K 明显）。
+              这正是「无论什么 strm 都能页内播放」的通用路径。
             </p>
           </span>
         </label>

@@ -197,13 +197,23 @@ export default function Player() {
           <p className="text-gray-300">
             {dec.level === 4
               ? "已为你选择外部播放器（原画画质/音质）。"
-              : "当前源需要服务端 Remux / 转码（Phase 3 的 :full 镜像提供），或唤起外部播放器。"}
+              : "当前源需要服务端 Remux / 转码才能页内播放，或唤起外部播放器。"}
           </p>
           {ext && (
             <a href={ext} target="_blank" rel="noreferrer" className="bg-brand rounded px-4 py-2">
               唤起外部播放器
             </a>
           )}
+        </div>
+      )}
+
+      {dec.warn && (
+        <div className="mt-3 bg-amber-500/10 border border-amber-500/40 rounded-lg p-4 text-sm text-amber-200">
+          <p className="font-medium mb-1">⚠️ 服务端缺少 ffmpeg</p>
+          <p>{dec.warn}</p>
+          <p className="mt-2 text-amber-200/80">
+            重新部署含 ffmpeg 的镜像（<code className="bg-black/30 px-1 rounded">tianjian518/newmovie:latest</code> 已含）后，MKV / HEVC 即可页内播放，无需外部播放器。
+          </p>
         </div>
       )}
 

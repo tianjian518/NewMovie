@@ -36,12 +36,20 @@ import (
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.14"
+const Version = "1.1.15"
 
 // Server 持有依赖。
 type Server struct {
 	Store store.Store
 	Cfg   *config.Config
+
+	// ffmpegOK 服务端是否安装了 ffmpeg。重封装(L2)/转码(L3)都依赖它；
+	// 缺失时这些路径不可用，playItem 会把相关文件降级为外部播放器并提示用户换镜像。
+	ffmpegOK bool
+	// transcodeOK ffmpeg 是否带 libx264 编码器（视频转码 L3 必需）。部分精简 ffmpeg
+	// 构建不含 libx264，此时重封装(L2)仍可用，但转码(L3)不可用——缺则 HEVC 改走
+	// L2 重封装（保留 HEVC，仅 HEVC 能力浏览器可播）而非返回空 200 让播放器黑屏。
+	transcodeOK bool
 
 	// scanMu/scanning 保证同一媒体库同时只有一个扫描协程。
 	// 没有这把锁时，前端连点两下「扫描」（或页面轮询期间用户手抖）就会起两个
@@ -81,7 +89,41 @@ func (s *Server) ScanRunning(libID string) bool {
 }
 
 // New 构造 Server。
-func New(st store.Store, cfg *config.Config) *Server { return &Server{Store: st, Cfg: cfg} }
+func New(st store.Store, cfg *config.Config) *Server {
+	s := &Server{Store: st, Cfg: cfg}
+	// 启动即探测 ffmpeg 能力与 libx264 编码器（视频转码 L3 必需）。
+	// - ffmpeg 在 + 带 libx264：重封装/转码都可用，默认开启转码（HEVC 也能页内播，
+	//   真正实现「无论什么 strm 都能播」）；仅当用户显式 VIDRIVE_TRANSCODE=0/off/false 时关闭。
+	// - ffmpeg 在但无 libx264：重封装(L2)可用，转码(L3)不可用，HEVC 改走 L2 保留 HEVC。
+	// - ffmpeg 不在：重封装/转码都不可用，MKV/HEVC 只能唤起外部播放器 + 明确提示换镜像。
+	if bin, err := exec.LookPath("ffmpeg"); err == nil {
+		s.ffmpegOK = true
+		if ffmpegHasEncoder(bin, "libx264") {
+			s.transcodeOK = true
+			if v := os.Getenv("VIDRIVE_TRANSCODE"); v != "0" && v != "off" && v != "false" {
+				s.Cfg.TranscodeEnabled = true
+			}
+			log.Printf("[info] ffmpeg 已就绪（含 libx264）：重封装/转码可用，HEVC 等将默认转码页内播")
+		} else {
+			log.Printf("[warn] ffmpeg 存在但缺少 libx264 编码器：重封装(L2)可用，视频转码(L3)不可用。" +
+				"HEVC 将走重封装保留 HEVC（仅 HEVC 能力浏览器可播）。请换含 libx264 的 ffmpeg 构建。")
+		}
+	} else {
+		s.ffmpegOK = false
+		log.Printf("[warn] 未找到 ffmpeg：重封装/转码不可用，MKV/HEVC 将只能唤起外部播放器。" +
+			"请用含 ffmpeg 的镜像（tianjian518/newmovie:latest 已含 ffmpeg）")
+	}
+	return s
+}
+
+// ffmpegHasEncoder 探测 ffmpeg 是否带某个编码器（如 libx264），用于判断转码能力。
+func ffmpegHasEncoder(bin, name string) bool {
+	out, err := exec.Command(bin, "-hide_banner", "-encoders").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(out, []byte(name))
+}
 
 // --- 通用辅助 ---
 
@@ -212,7 +254,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	// 免鉴权
 	switch {
 	case p == "api/health":
-		writeJSON(w, map[string]interface{}{"ok": true, "version": Version, "name": "NewMovie"})
+		writeJSON(w, map[string]interface{}{
+			"ok": true, "version": Version, "name": "NewMovie",
+			"ffmpeg_ok":    s.ffmpegOK,
+			"transcode_ok": s.transcodeOK,
+			"transcode":    s.Cfg.TranscodeEnabled,
+		})
 		return
 	case p == "api/login" && r.Method == http.MethodPost:
 		s.login(w, r)
@@ -1120,7 +1167,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	} else {
 		args = append(args, "-c", "copy")
 	}
-	args = append(args, "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov")
+	args = append(args, "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+delay_moov")
 	// atrack：仅抽取指定音轨（多音轨 MKV 切换语言用）。
 	// 指定后不再 copy 全部流，而是显式映射视频 + 该音轨。
 	if at := r.URL.Query().Get("atrack"); at != "" {
@@ -1154,12 +1201,16 @@ func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "服务端未安装 ffmpeg，无法转码（请在镜像中安装 ffmpeg）")
 		return
 	}
+	if !s.transcodeOK {
+		writeErr(w, http.StatusInternalServerError, "服务端 ffmpeg 缺少 libx264 编码器，无法转码（HEVC→H.264）。请换含 libx264 的 ffmpeg 构建，或关闭转码改用重封装/外部播放器")
+		return
+	}
 
 	// 视频转 H.264（CRF 20 近无损画质），音轨转 AAC。产物任何浏览器可播。
 	args := []string{"-loglevel", "error", "-i", "pipe:0",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
 		"-c:a", "aac", "-b:a", "192k",
-		"-movflags", "+frag_keyframe+empty_moov", "-f", "mp4"}
+		"-movflags", "+frag_keyframe+empty_moov+delay_moov", "-f", "mp4"}
 	// atrack：转码时把选定音轨映射进来（视频仍转 H.264）。
 	if at := r.URL.Query().Get("atrack"); at != "" {
 		if n, err := strconv.Atoi(at); err == nil && n >= 0 {
@@ -1450,6 +1501,19 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 				directURL = link.Data.URL
 				headers = link.Data.Headers
 			}
+			// 兜底（关键）：部分 STRM 的原始文本本身就是「可直接拉流」的 http(s) 直链，
+			// 例如 CloudDrive2 的 .cas 经 OpenList 取链返回的就是 /d/...cas?sign= 这种
+			// OpenList 中转链接——它自身 302 即跳转到真实网盘解密流，remux/转码端点能直接
+			// 跟随并产出 MP4（已用真实 4GB 源验证）。当 resolveOpenListLink 对内部路径取链
+			// 失败（路径编码对不上、模板占位符、或签名态异常）时，直接用原始 StrmRaw 兜底，
+			// 避免「网盘直链为空」502，真正实现「无论什么 strm 都能页内播」，用户零配置。
+			if rawURL == "" && directURL == "" && isStreamableURL(f.StrmRaw) {
+				rawURL = f.StrmRaw
+				triedPath = f.StrmRaw
+				if f.Container == "" {
+					f.Container = containerExt(f.StrmRaw)
+				}
+			}
 			if directURL == "" && st.SignKey != "" {
 				directURL = cl.SignedDURL(triedPath) // 自行算签名，不必让用户关签名
 			}
@@ -1525,6 +1589,8 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		DirectURL:        directURL,
 		SupportsRange:    true,
 		TranscodeEnabled: transcode,
+		FFmpegAvailable:  s.ffmpegOK,
+		TranscodeAvailable: s.transcodeOK,
 	}
 	dec := playback.Select(in)
 
@@ -1582,6 +1648,17 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		})
 	}
 
+	// ffmpeg 缺失且本文件需要重封装/转码才能页内播 → 给前端一句人话提示，
+	// 引导用户换含 ffmpeg 的镜像，而不是对着「外部播放器」发懵。
+	warn := ""
+	if !s.ffmpegOK && dec.Level == playback.L4External {
+		bNative := nativeC(f.Container) && nativeV(vc) && nativeA(ac)
+		if !bNative {
+			warn = "服务端未安装 ffmpeg：MKV/HEVC 等需重封装或转码才能页内播放，已唤起外部播放器。" +
+				"请部署含 ffmpeg 的镜像（tianjian518/newmovie:latest 已含 ffmpeg）。"
+		}
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"level":           int(dec.Level),
 		"label":           dec.Label,
@@ -1593,6 +1670,8 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		"supports_range":  dec.SupportsRange,
 		"headers":         headers,
 		"needs_transcode": dec.NeedsTranscode,
+		"ffmpeg_ok":       s.ffmpegOK,
+		"warn":            warn,
 		"resume_position": resume,
 		"resume_duration": total,
 		"item_id":         f.ItemID,
@@ -1601,6 +1680,37 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		"subtitles":       subs,
 		"audio_tracks":    f.AudioTracks,
 	})
+}
+
+// nativeC/nativeV/nativeA 暴露给 playItem 做「浏览器原生可播」判断（与 selector 一致），
+// 仅用于在响应里决定 ffmpeg 缺失时是否提示用户。
+func nativeC(c string) bool {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "mp4", "webm", "mov":
+		return true
+	}
+	return false
+}
+func nativeV(vc string) bool {
+	switch strings.ToLower(strings.TrimSpace(vc)) {
+	case "h264", "avc", "vp9", "av1":
+		return true
+	}
+	return false
+}
+func nativeA(ac string) bool {
+	switch strings.ToLower(strings.TrimSpace(ac)) {
+	case "aac", "mp3", "opus":
+		return true
+	}
+	return false
+}
+
+// isStreamableURL 判断一个 STRM 文本是否为「可直接拉流」的远程链接（http/https），
+// 含 OpenList 的 /d/...?sign= 中转链接——它本身 302 即跳真实网盘流，可交给 remux/转码端点。
+// 本地 file:// 或相对路径不在此列（需走本地读盘或挂载映射逻辑）。
+func isStreamableURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
 func maxInt(a, b int) int {
