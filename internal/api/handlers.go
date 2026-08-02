@@ -36,7 +36,8 @@ import (
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.15"
+// 2.0：内置 139cas 后端，一个容器完成「挂网盘 → 刮削 → 播放」。
+const Version = "2.0.0"
 
 // Server 持有依赖。
 type Server struct {
@@ -254,11 +255,20 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	// 免鉴权
 	switch {
 	case p == "api/health":
+		bundledPrefix := ""
+		if s.Cfg.BundledProxy {
+			bundledPrefix = BundledProxyPrefix + "/"
+		}
 		writeJSON(w, map[string]interface{}{
 			"ok": true, "version": Version, "name": "NewMovie",
 			"ffmpeg_ok":    s.ffmpegOK,
 			"transcode_ok": s.transcodeOK,
 			"transcode":    s.Cfg.TranscodeEnabled,
+			// 2.0：内置 139cas 状态。前端据此决定是否显示「网盘挂载」入口，
+			// 以及在接管尚未完成时给出「正在连接内置网盘」的提示。
+			"bundled":        s.Cfg.Bundled,
+			"bundled_ready":  BundledReady(),
+			"bundled_prefix": bundledPrefix,
 		})
 		return
 	case p == "api/login" && r.Method == http.MethodPost:

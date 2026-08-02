@@ -53,6 +53,18 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Handler())
 
+	// 2.0：内置 OpenList（139cas）——同容器双进程。
+	// 后台自动登录并注册为默认存储，用户无需再手填地址和 Token。
+	api.BootstrapBundled(st, cfg)
+	// 把内置后端的管理界面挂到同一个端口下，对外只暴露一个入口。
+	if cfg.BundledProxy {
+		if p := api.NewBundledProxy(cfg.BundledURL); p != nil {
+			mux.Handle(api.BundledProxyPrefix, p)
+			mux.Handle(api.BundledProxyPrefix+"/", p)
+			log.Printf("内置网盘管理界面 → %s%s/", cfg.Addr, api.BundledProxyPrefix)
+		}
+	}
+
 	// 前端静态资源（dist 由构建产出）。
 	// 必须用 fs.Sub 剥掉 "dist" 这层前缀：embed.FS 的根是 dist 的**父目录**，
 	// 直接 http.FS(dist) 会让 "/" 列出目录（页面上只有一个 dist/ 链接），

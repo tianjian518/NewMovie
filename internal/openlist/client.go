@@ -369,6 +369,104 @@ func (c *Client) tryOnce(api string, body []byte) ([]byte, error) {
 	return b, nil
 }
 
+// ---- 2.0：自动登录与设置读取 ----
+
+// Login 用账号密码换取 API Token（POST /api/auth/login）。
+//
+// 2.0 内置 OpenList 场景下，NewMovie 与 139cas 同容器运行，用户不该再手动
+// 去后台复制 Token。这里直接用管理员账号登录换一个，全程对用户不可见。
+//
+// 注意：Login 不走 do() 的重试封装——鉴权失败重试没意义，且失败信息要原样透出。
+func (c *Client) Login(username, password string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/api/auth/login", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("构造登录请求失败：%w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("连接 OpenList 失败：%w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("读取登录响应失败：%w", err)
+	}
+	var r struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return "", fmt.Errorf("登录响应不是 JSON（HTTP %d）", resp.StatusCode)
+	}
+	if r.Code != 200 || r.Data.Token == "" {
+		msg := r.Message
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return "", fmt.Errorf("登录 OpenList 失败：%s", msg)
+	}
+	return r.Data.Token, nil
+}
+
+// Ping 探测 OpenList 是否已就绪（GET /ping 返回 "pong"）。
+// 内置进程启动需要几秒到几十秒（初始化数据库、加载驱动），用它来轮询等待。
+func (c *Client) Ping() error {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/ping", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("OpenList /ping 返回 %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// SettingSignAll 读取 OpenList 后台的「签名所有」密钥（GET /api/admin/setting/get?key=token）。
+//
+// 这里取的是 conf.Token（OpenList 内部签名密钥），拿到后 NewMovie 就能自己算 sign，
+// 不必要求用户去后台关闭签名。取不到时返回空串——签名为空时 /d/ 链接照样能用
+// （只要后台没开「签名所有」），所以失败不是致命错误。
+func (c *Client) SettingSignAll() (string, error) {
+	u := strings.TrimRight(c.BaseURL, "/") + "/api/admin/setting/get?key=token"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", c.Token)
+	}
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		Code int `json:"code"`
+		Data struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil || r.Code != 200 {
+		return "", fmt.Errorf("读取签名密钥失败")
+	}
+	return r.Data.Value, nil
+}
+
 // olErr 是客户端的可读错误；transient=true 表示瞬时故障、do() 应重试。
 type olErr struct {
 	msg       string

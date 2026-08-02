@@ -1,34 +1,43 @@
 services:
-  vidrive:
-    # 把 yourname 换成你的 Docker Hub 用户名；多架构镜像自动匹配
-    image: tianjian518/newmovie:latest
-    container_name: vidrive
+  # NewMovie 2.0：一个容器包含「网盘后端(139cas) + 媒体库 + 播放器」。
+  # 不需要另外部署 OpenList，不需要复制 Token —— 起来就能用。
+  newmovie:
+    image: tianjian518/newmovie:2.0
+    container_name: newmovie
     ports:
       - "8096:8096"
     volumes:
+      # 同时存放 NewMovie 的媒体库数据和内置网盘(139cas)的配置，一个卷全搞定。
       - ./data:/data
-      # 若要用 STRM 模式，把 OpenList 落地的 strm 目录挂进来（只读）：
-      # - /volume1/docker/openlist/strm:/media/strm:ro
+      # 如果你另外用 CloudDrive2 / rclone 把网盘挂到了宿主机，挂进来可走本地直读：
+      # - /mnt/cloud:/mnt/cloud:ro
     environment:
       - TZ=Asia/Shanghai
       - VIDRIVE_ADMIN_PASS=请改成强密码
+      # 内置网盘的管理员密码。不填则首次启动自动生成随机密码，
+      # 存放在 ./data/openlist_admin_pass，NewMovie 会自动读取并接管。
+      # - NEWMOVIE_BUNDLED_PASS=请改成强密码
+      #
+      # 想关掉内置网盘、改回 1.x 的「连接外部 OpenList」模式：
+      # - NEWMOVIE_BUNDLED=0
+      #
       # VIDRIVE_SCAN_RATE=2   # 全局默认扫描限速 req/s（风控友好）
+      # VIDRIVE_TRANSCODE=1   # 开启视频转码（HEVC→H.264），CPU 开销大，按需开
     restart: unless-stopped
-    # 内存上限：ARM 小内存设备（NAS/树莓派）上给个护栏，
-    # 避免异常占用把整机拖垮；正常运行通常只占几十 MB。
-    mem_limit: 512m
+    # 内存上限：2.0 是双进程（139cas 自身约 100~200MB），比 1.x 需要更多余量。
+    # ARM 小内存设备（NAS/树莓派）建议至少给 1G。
+    mem_limit: 1g
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8096/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 40s
 
-  # 同网络部署 OpenList 时，用容器名互访：http://openlist:5244
-  # openlist:
-  #   image: xhofe/openlist:latest
-  #   volumes:
-  #     - ./openlist:/data
-  #   ports:
-  #     - "5244:5244"
-  #   restart: unless-stopped
+# 使用说明
+# ---------
+# 1. docker compose up -d
+# 2. 打开 http://<你的IP>:8096/            —— 媒体库与播放器（用 VIDRIVE_ADMIN_PASS 登录）
+# 3. 打开 http://<你的IP>:8096/openlist/   —— 网盘挂载管理（用 NEWMOVIE_BUNDLED_PASS 登录）
+#    在这里添加你的网盘（阿里云盘/夸克/115/天翼/移动云盘…），挂载后回到第 2 步建媒体库。
+#    内置网盘的存储条目已由 NewMovie 自动注册，无需手动填写地址和 Token。

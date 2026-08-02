@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -25,6 +26,26 @@ type Config struct {
 	// LocalRoots 允许服务端直接读盘播放的本地目录白名单（CloudDrive2 等本地 strm）。
 	// 仅当 strm 指向 file:// 且路径落在这些目录下才放行，否则拒绝——防任意文件读取（SSRF）。
 	LocalRoots []string
+
+	// ---- 2.0 内置 OpenList（139cas）----
+	// 2.0 把 139cas 作为同容器的后端进程一起打包。NewMovie 启动后自动登录它、
+	// 把它注册成默认存储，用户不用再手填地址和 Token。
+
+	// Bundled 是否启用内置 OpenList 接管。容器镜像里默认开；裸跑二进制默认关。
+	Bundled bool
+	// BundledURL 内置 OpenList 的地址，默认 http://127.0.0.1:5244（仅回环，不对外暴露）。
+	BundledURL string
+	// BundledName 自动注册的存储显示名。
+	BundledName string
+	// BundledToken 直接指定 Token；留空则用下面的账号密码登录换取。
+	BundledToken string
+	// BundledUser / BundledPass 内置 OpenList 的管理员账号，用于自动换取 Token。
+	BundledUser string
+	BundledPass string
+	// BundledTimeout 等待内置 OpenList 就绪的最长时间。
+	BundledTimeout time.Duration
+	// BundledProxy 是否把 /openlist/* 反代到内置 OpenList，让用户在同一端口管理网盘挂载。
+	BundledProxy bool
 }
 
 // Load 从环境变量加载配置，缺省则用合理默认值。
@@ -54,9 +75,39 @@ func Load() *Config {
 			c.DefaultRate = v
 		}
 	}
+
+	// ---- 2.0 内置 OpenList ----
+	// 镜像的 supervisord 会注入 NEWMOVIE_BUNDLED=1；裸跑时默认关闭，行为与 1.x 完全一致。
+	c.Bundled = boolenv("NEWMOVIE_BUNDLED", false)
+	c.BundledURL = strings.TrimRight(getenv("NEWMOVIE_BUNDLED_URL", "http://127.0.0.1:5244"), "/")
+	c.BundledName = getenv("NEWMOVIE_BUNDLED_NAME", "内置网盘")
+	c.BundledToken = os.Getenv("NEWMOVIE_BUNDLED_TOKEN")
+	c.BundledUser = getenv("NEWMOVIE_BUNDLED_USER", "admin")
+	c.BundledPass = os.Getenv("NEWMOVIE_BUNDLED_PASS")
+	c.BundledTimeout = 90 * time.Second
+	if v := os.Getenv("NEWMOVIE_BUNDLED_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.BundledTimeout = d
+		}
+	}
+	// 反代默认跟随 Bundled：开了内置就默认能在同端口访问挂载管理页。
+	c.BundledProxy = boolenv("NEWMOVIE_BUNDLED_PROXY", c.Bundled)
+
 	c.DBFile = c.DataDir + "/newmovie.json"
 	c.CacheDir = c.DataDir + "/cache"
 	return c
+}
+
+// boolenv 解析布尔环境变量：1/true/on/yes 为真，0/false/off/no 为假，未设置或无法识别用 def。
+func boolenv(k string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+	switch v {
+	case "1", "true", "on", "yes", "y":
+		return true
+	case "0", "false", "off", "no", "n":
+		return false
+	}
+	return def
 }
 
 func getenv(k, def string) string {

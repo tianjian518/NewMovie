@@ -453,6 +453,13 @@ const icSet = ({ className }: IconProps) => (
   </svg>
 );
 
+// 云盘图标：2.0 内置网盘（139cas）管理入口。
+const icCloud = ({ className = "" }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.2 9.4 4 4 0 0 0 6.5 19h11Z" />
+  </svg>
+);
+
 const navItems = [
   { to: "/", label: "首页", Icon: icHome, end: true },
   { to: "/libraries", label: "媒体库", Icon: icLib, end: false },
@@ -460,8 +467,45 @@ const navItems = [
   { to: "/settings", label: "设置", Icon: icSet, end: false },
 ];
 
+// useBundled 读取健康检查里的内置网盘状态。
+// 2.0 的容器内置了 139cas，此时侧边栏要多出一个「网盘挂载」入口；
+// 1.x 式的裸跑部署完全看不到它，界面保持原样。
+function useBundled() {
+  const [info, setInfo] = useState<{ on: boolean; ready: boolean; prefix: string }>({
+    on: false,
+    ready: false,
+    prefix: "",
+  });
+  useEffect(() => {
+    let alive = true;
+    let id: ReturnType<typeof setInterval> | undefined;
+    const tick = () =>
+      api
+        .health()
+        .then((h: any) => {
+          if (!alive) return;
+          const next = { on: !!h.bundled, ready: !!h.bundled_ready, prefix: h.bundled_prefix || "" };
+          setInfo(next);
+          // 接管成功（或压根没开内置）后就没必要继续轮询了。
+          if (!next.on || next.ready) {
+            if (id) clearInterval(id);
+          }
+        })
+        .catch(() => {});
+    tick();
+    // 内置后端首次启动要几十秒，接管完成前每 5 秒探一次，让状态点及时转绿。
+    id = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      if (id) clearInterval(id);
+    };
+  }, []);
+  return info;
+}
+
 // 桌面左侧窄栏（md 及以上显示）。
 function Sidebar({ onLogout }: { onLogout: () => void }) {
+  const bundled = useBundled();
   return (
     <aside className="hidden md:flex w-44 bg-panel p-4 space-y-1 shrink-0 flex-col border-r border-white/5">
       <div className="text-lg font-bold mb-5 px-3">NewMovie</div>
@@ -479,6 +523,24 @@ function Sidebar({ onLogout }: { onLogout: () => void }) {
           {label}
         </NavLink>
       ))}
+      {bundled.on && bundled.prefix && (
+        <a
+          href={bundled.prefix}
+          target="_blank"
+          rel="noreferrer"
+          title={bundled.ready ? "添加 / 管理你的网盘" : "内置网盘启动中…"}
+          className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-300 hover:bg-card"
+        >
+          {icCloud({ className: "w-5 h-5 shrink-0" })}
+          <span className="flex-1">网盘挂载</span>
+          <span
+            className={
+              "w-1.5 h-1.5 rounded-full shrink-0 " +
+              (bundled.ready ? "bg-emerald-400" : "bg-amber-400 animate-pulse")
+            }
+          />
+        </a>
+      )}
       <button
         onClick={onLogout}
         className="mt-auto text-left px-3 py-2 rounded-lg text-sm text-gray-500 hover:bg-card hover:text-gray-300"
@@ -491,6 +553,7 @@ function Sidebar({ onLogout }: { onLogout: () => void }) {
 
 // 手机底部标签栏（<md 显示），仿飞牛影视：图标 + 文字，等宽分布。
 function BottomNav() {
+  const bundled = useBundled();
   return (
     <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-panel/95 backdrop-blur border-t border-white/10 pb-[env(safe-area-inset-bottom)]">
       <div className="flex">
@@ -508,6 +571,20 @@ function BottomNav() {
             {label}
           </NavLink>
         ))}
+        {bundled.on && bundled.prefix && (
+          <a
+            href={bundled.prefix}
+            target="_blank"
+            rel="noreferrer"
+            className="flex-1 flex flex-col items-center gap-0.5 py-2 text-[11px] text-gray-400 relative"
+          >
+            {icCloud({ className: "w-6 h-6" })}
+            网盘
+            {!bundled.ready && (
+              <span className="absolute top-1.5 right-[30%] w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+            )}
+          </a>
+        )}
       </div>
     </nav>
   );

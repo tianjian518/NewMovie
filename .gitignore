@@ -10,3 +10,9 @@
 # 本地端到端验证产物（Playwright 截图），不入库
 /*_test.png
 /ui_*.png
+
+# 2.0：内置 OpenList（139cas）构建产物，不入库
+/openlist/public/dist/
+/openlist/bin/
+/openlist/data/
+/openlist/dist.tar.gz

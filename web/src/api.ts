@@ -1,7 +1,7 @@
 // 后端 API 客户端。token 存 localStorage，所有请求自动带 Authorization。
 import type {
   Storage, Library, MediaItem, PlayDecision, ScanJob, PathRewrite,
-  ItemDetail, ContinueRow, FavoriteRow, BrowseResp,
+  ItemDetail, ContinueRow, FavoriteRow, BrowseResp, Health,
 } from "./types";
 
 const TOKEN_KEY = "vidrive_token";
@@ -37,7 +37,7 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  health: () => req<any>("/api/health"),
+  health: () => req<Health>("/api/health"),
   login: (username: string, password: string) =>
     req<{ token: string; is_admin: boolean }>("/api/login", {
       method: "POST",

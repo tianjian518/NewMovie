@@ -158,3 +158,21 @@ export interface PathRewrite {
   pattern: string;
   replacement: string;
 }
+
+// Health 是 /api/health 的响应。
+export interface Health {
+  ok: boolean;
+  name: string;
+  version: string;
+  // ffmpeg 能力：重封装(L2)需要 ffmpeg，转码(L3)还需要 libx264。
+  ffmpeg_ok: boolean;
+  transcode_ok: boolean;
+  transcode: boolean;
+  // 2.0 内置网盘（139cas）：
+  //   bundled        —— 是否运行在内置模式（容器镜像默认开）
+  //   bundled_ready  —— 是否已自动接管成功（登录换 Token + 注册存储）
+  //   bundled_prefix —— 网盘管理界面的挂载前缀，空串表示未开启反代
+  bundled: boolean;
+  bundled_ready: boolean;
+  bundled_prefix: string;
+}
