@@ -35,7 +35,7 @@ import (
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.11"
+const Version = "1.1.12"
 
 // Server 持有依赖。
 type Server struct {
@@ -1029,8 +1029,15 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	args := []string{"-loglevel", "error", "-i", "pipe:0", "-c", "copy", "-f", "mp4",
-		"-movflags", "+frag_keyframe+empty_moov"}
+	args := []string{"-loglevel", "error", "-i", "pipe:0"}
+	// aac=1：视频保持拷贝（HEVC/H264 不变），仅把不兼容 MP4 的音轨（DTS/TrueHD/Atmos/FLAC）
+	// 实时转成 AAC。4K 蓝光原盘（HEVC + DTS-HD/TrueHD/Atmos）借此页内可播，且几乎不耗服务端算力。
+	if r.URL.Query().Get("aac") == "1" {
+		args = append(args, "-c:v", "copy", "-c:a", "aac", "-b:a", "320k")
+	} else {
+		args = append(args, "-c", "copy")
+	}
+	args = append(args, "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov")
 	// atrack：仅抽取指定音轨（多音轨 MKV 切换语言用）。
 	// 指定后不再 copy 全部流，而是显式映射视频 + 该音轨。
 	if at := r.URL.Query().Get("atrack"); at != "" {
@@ -1321,10 +1328,15 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	dec := playback.Select(in)
 
 	// L2 重封装：浏览器不认 MKV 等容器，但编码本身可播。把源交给
-	// /api/play/remux 实时 -c copy 成 MP4 流式播放，避免甩外部播放器。
+	// /api/play/remux 实时 -c copy（或仅转音轨）成 MP4 流式播放，避免甩外部播放器。
 	if dec.Level == playback.L2Remux {
 		if src := playback.PickURL(in); src != "" {
-			dec.URL = playback.RemuxURL(src)
+			u := playback.RemuxURL(src)
+			// 音轨不兼容 MP4（DTS/TrueHD/Atmos）：让 remux 端点视频拷贝、音轨转 AAC。
+			if dec.NeedsAudioTranscode {
+				u += "&aac=1"
+			}
+			dec.URL = u
 			// 转封装流无法可靠响应 Range，页内从头播即可（fragmented mp4 仍可拖）。
 			dec.SupportsRange = false
 		}

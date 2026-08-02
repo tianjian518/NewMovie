@@ -42,6 +42,9 @@ type Decision struct {
 	UseRawURL      bool   // 是否优先用 raw_url（绕过 OpenList 中转）
 	SupportsRange  bool
 	NeedsTranscode bool
+	// NeedsAudioTranscode：L2 重封装时，视频保持拷贝、仅把不兼容 MP4 的音轨
+	//（DTS/TrueHD/Atmos/FLAC）实时转成 AAC。原画质零损失、几乎零开销。
+	NeedsAudioTranscode bool
 }
 
 // 浏览器原生支持的白名单（保守，见 PLAN.md 第六节）。
@@ -55,8 +58,11 @@ var (
 // 仅换容器、不重编码，原画质/音质零损失、服务端近乎零开销（见 L2Remux 与 /api/play/remux）。
 // HEVC(h265) 多数现代浏览器（Safari 原生、Chrome/Edge 在有系统解码器时）能在 MP4 里解，
 // 故纳入重封装，让用户能在页内直接看 4K/HDR，而不是被甩去外部播放器。
-// 仅当音轨无法重封装（如 DTS/TrueHD/Atmos，MP4 装不下）或客户端确无 HEVC 解码时，
-// 才退回 L4 外部播放器。
+// 音轨分两类处理：
+//   - aac/ac3/eac3/mp3/opus 可直接 -c copy 进 MP4（纯重封装）；
+//   - dts/truehd/atmos/flac 等装不进 MP4，则走「视频拷贝 + 音轨转 AAC」的轻量重封装
+//     （Decision.NeedsAudioTranscode=true），同样页内可播，不再甩外部播放器。
+// 仅当视频编码本身浏览器无法解码、且未开转码时，才退回 L4 外部播放器。
 var (
 	remuxVideo = map[string]bool{
 		"h264": true, "avc": true,
@@ -105,10 +111,20 @@ func Select(in Input) Decision {
 	}
 
 	// 非原生：先看是否只需修正容器（编码本身浏览器支持）→ L2 Remux
-	remuxable := remuxVideo[vc] && remuxAudio[ac] && remuxContainers[c]
-	if remuxable {
-		return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4",
-			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
+	videoRemuxable := remuxVideo[vc]
+	containerRemuxable := remuxContainers[c]
+	if videoRemuxable && containerRemuxable {
+		// 音轨能否原样拷进 MP4：aac/ac3/eac3/mp3/opus 可直接 -c copy；
+		// dts/truehd/atmos/flac 等装不进 MP4，必须转码音轨（见下方 NeedsAudioTranscode）。
+		if remuxAudio[ac] {
+			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4",
+				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
+		}
+		// 视频保留（HEVC/H264 不变），仅把不兼容 MP4 的音轨实时转成 AAC：
+		// 原画质零损失、仅极轻量音频转码，页内即可播放，不必甩外部播放器。
+		// 这正是 4K 蓝光原盘（HEVC + DTS-HD/TrueHD/Atmos）能在页内播的关键。
+		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（DTS/TrueHD 等不兼容 MP4）",
+			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
 	}
 
 	// 编码不支持：转码 或 外部播放器

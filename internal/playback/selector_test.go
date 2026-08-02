@@ -45,13 +45,14 @@ func TestL2RemuxMKV(t *testing.T) {
 }
 
 func TestL3TranscodeWhenEnabled(t *testing.T) {
-	// 音轨无法重封装（DTS）且开了转码 → 真转码（重封装优先于转码，故用 DTS 触发）。
+	// 视频编码本身浏览器无法重封装、且开了转码 → 真转码。
+	// （HEVC+DTS 现已走 L2 轻量音轨转码，故这里用不支持重封装的视频编码触发 L3。）
 	d := Select(Input{
-		Container: "mkv", VideoCodec: "hevc", AudioCodec: "dts",
+		Container: "mkv", VideoCodec: "wmv", AudioCodec: "dts",
 		RawURL: "https://cdn.example.com/f.mkv", TranscodeEnabled: true,
 	})
 	if d.Level != L3Transcode || !d.NeedsTranscode {
-		t.Fatalf("HEVC+DTS 且开转码应 L3 转码，得到 %+v", d)
+		t.Fatalf("不支持重封装的视频编码且开转码应 L3，得到 %+v", d)
 	}
 }
 
@@ -90,14 +91,36 @@ func TestL2RemuxHEVC_MP4(t *testing.T) {
 }
 
 func TestL4ExternalWhenTranscodeOff(t *testing.T) {
-	// HEVC 但音轨无法重封装（DTS/TrueHD/Atmos 装不进 MP4）→ 仍回退外部播放器，
-	// 而不是给一句"不支持"。
+	// 视频编码本身不支持重封装、且未开转码 → 回退外部播放器（而不是给一句"不支持"）。
 	d := Select(Input{
-		Container: "mkv", VideoCodec: "hevc", AudioCodec: "dts",
-		RawURL: "https://cdn.example.com/f.mkv", TranscodeEnabled: false,
+		Container: "avi", VideoCodec: "wmv", AudioCodec: "aac",
+		RawURL: "https://cdn.example.com/f.avi", TranscodeEnabled: false,
 	})
 	if d.Level != L4External {
-		t.Fatalf("HEVC+DTS 无法重封装应 L4 外部，得到 %+v", d)
+		t.Fatalf("不支持重封装的视频编码且未开转码应 L4 外部，得到 %+v", d)
+	}
+}
+
+func TestL2RemuxHEVC_MKV_DTS(t *testing.T) {
+	// 4K 蓝光原盘典型组合：HEVC 视频 + DTS-HD 音轨。
+	// 视频保留、仅把 DTS 转成 AAC 重封装为 MP4 → 页内可播，不再甩外部播放器。
+	d := Select(Input{
+		Container: "mkv", VideoCodec: "hevc", AudioCodec: "dts",
+		RawURL: "https://cdn.example.com/f.mkv",
+	})
+	if d.Level != L2Remux || !d.NeedsAudioTranscode {
+		t.Fatalf("HEVC+DTS 应 L2 且 NeedsAudioTranscode，得到 %+v", d)
+	}
+}
+
+func TestL2RemuxHEVC_MKV_TrueHD(t *testing.T) {
+	// TrueHD/Atmos 同理：视频拷贝、音轨转 AAC。
+	d := Select(Input{
+		Container: "mkv", VideoCodec: "h265", AudioCodec: "truehd",
+		RawURL: "https://cdn.example.com/f.mkv",
+	})
+	if d.Level != L2Remux || !d.NeedsAudioTranscode {
+		t.Fatalf("HEVC+TrueHD 应 L2 且 NeedsAudioTranscode，得到 %+v", d)
 	}
 }
 
