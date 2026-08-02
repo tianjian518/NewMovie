@@ -61,3 +61,55 @@ DTS 音轨使 `remuxable = false`，加上 `handlers.go` 里 `TranscodeEnabled` 
 ## 五、版本
 
 `internal/api/handlers.go` 版本号 `1.1.11` → `1.1.12`。
+
+## 六、重新部署与页内播放验证
+
+> v1.1.12 已推送 GitHub（`main` + `v1.1.12` tag），GitHub Actions 会自动重建并推到 Docker Hub。
+
+### 方案 A：Docker（标准路径，等镜像上 Docker Hub 后拉取）
+
+1. 等 GitHub Actions 把 v1.1.12 镜像推到 Docker Hub（通常几分钟内完成）。
+2. 部署机执行：
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+3. 确认版本：
+   ```bash
+   curl -s localhost:8096/api/health
+   # 期望返回 {"ok":true,"version":"1.1.12","name":"NewMovie"}
+   ```
+
+### 方案 B：本地源码构建（不等 Docker Hub，立刻验证）
+
+前置：Go 1.22+ 、Node 22+ ，运行环境带 `ffmpeg`。
+
+```bash
+git pull                 # 或 git checkout v1.1.12
+make build               # Makefile 的 build-go 路径 bug 已修，现可一次跑通
+# 直接运行：
+VIDRIVE_DATA=./data VIDRIVE_ADDR=:8096 ./bin/vidrive
+```
+
+或本地打镜像（不依赖 Docker Hub）：
+
+```bash
+docker build -t newmovie:local .
+docker run -p 8096:8096 -v "$PWD/data:/data" newmovie:local
+```
+
+### 页内播放验证（核心）
+
+1. 打开一部 **4K HEVC + DTS / TrueHD / Atmos** 的电影详情页，点「播放」。
+2. 预期：直接页内播放，**不再弹「已为你选择外部播放器」**。
+3. 抓包看播放请求 URL：应带 `&aac=1`（表示视频拷贝 + 音轨实时转 AAC 的 L2 重封装）。
+4. 若仍弹外部播放器：说明该文件「视频编码」不在可重封装列表（如 wmv / rm / avi 老编码），
+   属预期的 L3 / L4 降级，并非本修复失效。
+5. 边界：Firefox / 部分 Linux Chrome 本身不解码 HEVC，MP4-HEVC 仍放不出，
+   需开 `TranscodeEnabled`（视频也转 H.264）才能页内播。
+
+### Makefile 已修的坑
+
+原 `build-go` 写 `cd cmd/server && go build ... ./cmd/server`，`cd` 之后 `./cmd/server`
+路径不存在会报错。已改为 `go build -o bin/vidrive ./cmd/server`，`make build` 现可一次跑通。
+另把 `/bin` 加入 `.gitignore`，避免构建产物污染提交。

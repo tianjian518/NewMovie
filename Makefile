@@ -10,7 +10,7 @@ web:
 
 ## 后端构建（无需前端时也可单独跑，使用占位页）
 build-go:
-	cd cmd/server && go build -o ../../bin/vidrive ./cmd/server
+	go build -o bin/vidrive ./cmd/server
 
 ## 全量构建二进制（先前端后后端）
 build: web build-go

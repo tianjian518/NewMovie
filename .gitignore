@@ -3,6 +3,7 @@
 /cmd/server/dist/*
 !/cmd/server/dist/index.html
 /data
+/bin
 *.exe
 *.test
 /web/tsconfig.tsbuildinfo
