@@ -51,18 +51,23 @@ var (
 	nativeAudio      = map[string]bool{"aac": true, "mp3": true, "opus": true}
 )
 
-// 可无损重封装进 MP4 的编码：容器不兼容但编码本身浏览器通用能解，
-// 用 ffmpeg -c copy 换个壳即可页内播放（见 L2Remux 与 /api/play/remux）。
-// 注意：hevc 不在此列——浏览器对 HEVC 支持不普遍（多数 Chrome 无硬解），
-// 强行复制进 MP4 会在无硬解设备上播不出来，反而比甩外部播放器更糟。
+// 可无损重封装（ffmpeg -c copy 换个壳）页内播放的编码/容器。
+// 仅换容器、不重编码，原画质/音质零损失、服务端近乎零开销（见 L2Remux 与 /api/play/remux）。
+// HEVC(h265) 多数现代浏览器（Safari 原生、Chrome/Edge 在有系统解码器时）能在 MP4 里解，
+// 故纳入重封装，让用户能在页内直接看 4K/HDR，而不是被甩去外部播放器。
+// 仅当音轨无法重封装（如 DTS/TrueHD/Atmos，MP4 装不下）或客户端确无 HEVC 解码时，
+// 才退回 L4 外部播放器。
 var (
 	remuxVideo = map[string]bool{
 		"h264": true, "avc": true,
 		"vp9": true, "av1": true,
+		"h265": true, "hevc": true,
 	}
-	remuxAudio = map[string]bool{"aac": true, "mp3": true, "opus": true}
-	// 这些容器浏览器原生不支持，但编码可被 -c copy 塞进 MP4。
-	remuxContainers = map[string]bool{"mkv": true, "ts": true, "m2ts": true, "flv": true}
+	remuxAudio = map[string]bool{"aac": true, "mp3": true, "opus": true, "ac3": true, "eac3": true}
+	// 这些容器「编码本身浏览器能解」但原容器浏览器不认，可被 -c copy 塞进 MP4。
+	// mp4/mov 也纳入：当里面是 HEVC 时（浏览器原生白名单不含 h265），
+	// 走一次同封装重混流即可在页内尝试播放，避免无谓地甩外部。
+	remuxContainers = map[string]bool{"mkv": true, "ts": true, "m2ts": true, "flv": true, "mp4": true, "mov": true}
 )
 
 func norm(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
