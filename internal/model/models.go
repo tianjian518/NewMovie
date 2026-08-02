@@ -24,7 +24,13 @@ type Storage struct {
 	Token     string      `json:"token"`      // OpenList API token
 	SignKey   string      `json:"sign_key"`   // OpenList 后台 "签名所有" 密钥
 	RateLimit float64     `json:"rate_limit"` // req/s，默认 2
-	CreatedAt int64       `json:"created_at"`
+	// LocalRoot 该存储的本地挂载根目录（可选）。例：用 CloudDrive2 / rclone 把同一网盘
+	// 挂到本地 /mnt/cloud，而 strm 文件里写的是 /mnt/cloud/媒体/A.mkv。填了 LocalRoot 后，
+	// resolver 会自动把本地挂载前缀剥离，把 strm 路径映射成该存储的内部相对路径
+	// （/媒体/A.mkv）去取链，本地路径型 .strm 即可直接页内播放——无需改 strm、无需
+	// 路径重写、无需全局白名单。这是从源头解决"本地路径型 strm"的核心配置点。
+	LocalRoot string `json:"local_root,omitempty"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 // ---- 媒体库 ----

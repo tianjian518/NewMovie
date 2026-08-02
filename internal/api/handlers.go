@@ -36,7 +36,7 @@ import (
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.13"
+const Version = "1.1.14"
 
 // Server 持有依赖。
 type Server struct {
@@ -118,6 +118,34 @@ func (s *Server) requireUser(r *http.Request) (model.User, bool) {
 
 func (s *Server) clientFor(storage model.Storage) *openlist.Client {
 	return &openlist.Client{BaseURL: storage.BaseURL, Token: storage.Token, SignKey: storage.SignKey}
+}
+
+// resolveOpenListLink 在 OpenList 存储里定位 strm 指向的文件。
+// 先用完整路径取链；若失败（常见于「本地路径型 strm」前缀与存储内部路径不一致），
+// 逐级剥掉路径前缀重试（/mnt/cloud/媒体/A.mkv → /cloud/媒体/A.mkv → /媒体/A.mkv → /A.mkv），
+// 命中即用。返回最终命中的 link 与用于后续（签名/容器探测）的 actual 路径。
+// 这是「无论什么 strm 都能页内播放」的零配置兜底：用户不必为路径前缀差异做任何配置。
+func (s *Server) resolveOpenListLink(cl *openlist.Client, path string) (*openlist.FsGetResp, string) {
+	p := path
+	last := p
+	for {
+		link, err := cl.GetLink(p, s.Cfg.ProxyRefresh)
+		if err == nil && link != nil && (link.Data.RawURL != "" || link.Data.URL != "") {
+			return link, p
+		}
+		last = p
+		// 剥掉第一段（保留前导 /）
+		rest := strings.TrimPrefix(p, "/")
+		idx := strings.Index(rest, "/")
+		if idx < 0 {
+			break
+		}
+		p = "/" + rest[idx+1:]
+		if p == "/" {
+			break
+		}
+	}
+	return nil, last
 }
 
 // tmdbKey 解析 TMDB Key：环境变量优先，其次用户在前端自填并持久化的设置。
@@ -991,10 +1019,21 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 	writeErr(w, http.StatusNotFound, "unknown play route")
 }
 
-// allowedLocalRoot 判断本地文件路径是否落在配置的允许目录（VIDRIVE_LOCAL_ROOTS）内。
+// allowedLocalRoot 判断本地文件路径是否落在允许目录内。
+// 允许目录 = 各存储配置的 local_root（自动纳入，对应其本地挂载根）+ 可选的
+// VIDRIVE_LOCAL_ROOTS（全局兜底）。这样用户只需在存储配置里填 local_root，
+// file:// 直读盘即自动放行，不必再单独维护全局白名单。根目录 / 永远不允许作为放行范围。
 func (s *Server) allowedLocalRoot(p string) bool {
 	clean := path.Clean(p)
-	for _, root := range s.Cfg.LocalRoots {
+	roots := append([]string{}, s.Cfg.LocalRoots...)
+	if sts, err := s.Store.ListStorages(); err == nil {
+		for _, st := range sts {
+			if st.LocalRoot != "" {
+				roots = append(roots, st.LocalRoot)
+			}
+		}
+	}
+	for _, root := range roots {
 		r := path.Clean(root)
 		if r == "/" {
 			continue // 不允许用根目录作为放行范围
@@ -1402,17 +1441,20 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 				return
 			}
 			cl := s.clientFor(st)
-			link, e := cl.GetLink(res.Path, s.Cfg.ProxyRefresh)
-			if e == nil {
+			// resolveOpenListLink 会先用 res.Path 取链，失败则逐级剥前缀回退探测。
+			// 这样即使 strm 本地路径没配 LocalRoot、前缀对不上存储内部路径，也能
+			// 靠文件名/相对路径逐级命中，做到「无论什么 strm 都能页内播」。
+			link, triedPath := s.resolveOpenListLink(cl, res.Path)
+			if link != nil {
 				rawURL = link.Data.RawURL
 				directURL = link.Data.URL
 				headers = link.Data.Headers
 			}
 			if directURL == "" && st.SignKey != "" {
-				directURL = cl.SignedDURL(res.Path) // 自行算签名，不必让用户关签名
+				directURL = cl.SignedDURL(triedPath) // 自行算签名，不必让用户关签名
 			}
 			if f.Container == "" {
-				f.Container = containerExt(res.Path)
+				f.Container = containerExt(triedPath)
 			}
 		case "file":
 			rawURL = "file://" + res.Path

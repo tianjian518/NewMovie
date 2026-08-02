@@ -8,6 +8,7 @@ export interface Storage {
   token: string;
   sign_key: string;
   rate_limit: number;
+  local_root?: string; // 本地挂载根（可选）。填了之后本地路径型 .strm 自动映射页内播放
 }
 
 export interface Library {

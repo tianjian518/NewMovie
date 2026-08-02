@@ -109,3 +109,39 @@ func TestCleanStripsBOMAndComment(t *testing.T) {
 		t.Fatalf("BOM/CR 应被清理，得到 %+v", src)
 	}
 }
+
+// TestResolveLocalRootMapping 锁定「本地路径型 strm」源头修复：strm 里写的是本地挂载
+// 路径（如 /mnt/cloud/媒体/A.mkv），而该路径对应某个 OpenList 存储的本地镜像。
+// 存储配了 LocalRoot 后，resolver 应剥离挂载前缀、映射成存储内部路径去取链。
+func TestResolveLocalRootMapping(t *testing.T) {
+	r := NewResolver([]model.Storage{
+		{ID: "ol1", Name: "main", Type: model.StorageOpenList, LocalRoot: "/mnt/cloud"},
+	}, nil)
+	src := r.Resolve("/mnt/cloud/媒体/A.mkv")
+	if src.Scheme != "openlist" || src.StorageID != "ol1" || src.Path != "/媒体/A.mkv" {
+		t.Fatalf("本地挂载路径应映射为 openlist 内部路径，得到 %+v", src)
+	}
+}
+
+// TestResolveLocalRootMappingNested 嵌套挂载前缀也应正确剥离。
+func TestResolveLocalRootMappingNested(t *testing.T) {
+	r := NewResolver([]model.Storage{
+		{ID: "ol1", Name: "main", Type: model.StorageOpenList, LocalRoot: "/mnt/cloud/盘"},
+	}, nil)
+	src := r.Resolve("/mnt/cloud/盘/电影/某片.mkv")
+	if src.Scheme != "openlist" || src.Path != "/电影/某片.mkv" {
+		t.Fatalf("嵌套挂载前缀应正确剥离，得到 %+v", src)
+	}
+}
+
+// TestResolveLocalRootNotForLocalStorage local 型存储的 LocalRoot 不应触发远程映射，
+// 应回退到整路径兜底（由调用方探测）。
+func TestResolveLocalRootNotForLocalStorage(t *testing.T) {
+	r := NewResolver([]model.Storage{
+		{ID: "loc1", Name: "local", Type: model.StorageLocal, LocalRoot: "/mnt/cloud"},
+	}, nil)
+	src := r.Resolve("/mnt/cloud/媒体/A.mkv")
+	if src.Scheme != "openlist" || src.Path != "/mnt/cloud/媒体/A.mkv" {
+		t.Fatalf("local 存储不应剥离前缀，得到 %+v", src)
+	}
+}

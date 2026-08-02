@@ -166,7 +166,7 @@ type fsGetReq struct {
 	Refresh  bool   `json:"refresh"`
 }
 
-type fsGetResp struct {
+type FsGetResp struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    struct {
@@ -234,14 +234,14 @@ func (c *Client) List(path string, refresh bool) ([]FsObj, error) {
 }
 
 // GetLink 取某文件的直链信息（raw_url + /d/ url + 所需 headers）。
-func (c *Client) GetLink(path string, refresh bool) (*fsGetResp, error) {
+func (c *Client) GetLink(path string, refresh bool) (*FsGetResp, error) {
 	path = NormalizePath(path)
 	body, _ := json.Marshal(fsGetReq{Path: path, Refresh: refresh})
 	resp, err := c.do("/api/fs/get", body)
 	if err != nil {
 		return nil, err
 	}
-	var r fsGetResp
+	var r FsGetResp
 	if err := json.Unmarshal(resp, &r); err != nil {
 		return nil, err
 	}

@@ -82,10 +82,32 @@ func (r *Resolver) Resolve(raw string) ResolvedSource {
 
 	// 3) 以 / 开头：本地文件 或 OpenList 内部路径（Without Url 模式）
 	if strings.HasPrefix(line, "/") {
+		// 源头解决「本地路径型 strm」：用户往往用 CloudDrive2 / rclone 把网盘挂载到
+		// 本地（如 /mnt/cloud），strm 里写的是挂载路径；而同一网盘在 Vidrive 里是某个
+		// OpenList 存储。两者只差一个「挂载前缀」。若某（非 local 型）存储配了
+		// LocalRoot 且路径以其开头，直接剥离挂载前缀得到存储内部相对路径，走 OpenList
+		// 取链页内播放——用户零额外操作（不用改 strm / 重写 / 全局白名单）。
+		for _, st := range r.Storages {
+			if st.LocalRoot == "" || st.Type == model.StorageLocal {
+				continue
+			}
+			lr := strings.TrimRight(st.LocalRoot, "/")
+			if line == lr || strings.HasPrefix(line, lr+"/") {
+				internal := "/" + strings.TrimPrefix(strings.TrimPrefix(line, lr), "/")
+				return ResolvedSource{
+					Scheme:      "openlist",
+					StorageID:   st.ID,
+					Path:        internal,
+					IsOpenListD: true,
+				}
+			}
+		}
+		// 本地文件真的挂进了容器（如用户把盘挂进容器且 strm 写容器可见路径），直接读盘。
 		if _, err := os.Stat(line); err == nil {
 			return ResolvedSource{Scheme: "file", Path: line}
 		}
-		// 默认当作首个 OpenList 存储的内部路径（无 URL 模式）
+		// 默认当作首个 OpenList 存储的内部路径（无 URL 模式）；若整路径取不到，
+		// 调用方（playItem）会逐级剥前缀回退探测。
 		if sid := r.firstOpenListID(); sid != "" {
 			return ResolvedSource{Scheme: "openlist", StorageID: sid, Path: line, IsOpenListD: true}
 		}

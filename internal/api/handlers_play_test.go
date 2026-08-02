@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -62,5 +63,90 @@ func TestPlay_StrmHttpHEVC_TranscodeWhenEnabled(t *testing.T) {
 	}
 	if !strings.Contains(d.URL, "/api/play/transcode?u=") {
 		t.Fatalf("HEVC 播放 URL 应指向 transcode 端点，得到 %q", d.URL)
+	}
+}
+
+// mockOpenList 起一个最小 OpenList /api/fs/get 模拟服务：仅接受 accept 路径返回
+// 真实直链，其余返回 code!=200 模拟「文件不存在」。用于验证本地路径型 strm 的
+// 精确映射与逐级探测兜底。
+func mockOpenListFS(t *testing.T, accept string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var q struct {
+			Path string `json:"path"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&q)
+		if q.Path == accept {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 200,
+				"data": map[string]any{"raw_url": "https://ol.example.com/file" + accept, "url": "https://ol.example.com/d" + accept},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 500, "message": "object not found"})
+	}))
+}
+
+// TestPlay_StrmLocalPath_MapsViaLocalRoot 锁定源头修复：本地挂载路径型 strm
+// （/mnt/cloud/媒体/A.mkv）+ 存储配了 LocalRoot。resolver 剥离挂载前缀映射成
+// 存储内部路径 /媒体/A.mkv，playItem 直接取链，走 L2 页内播放，不再需要任何
+// 全局白名单 / 改 strm / 路径重写。
+func TestPlay_StrmLocalPath_MapsViaLocalRoot(t *testing.T) {
+	st, do := featureFixture(t)
+	ol := mockOpenListFS(t, "/媒体/A.mkv")
+	defer ol.Close()
+	_ = st.SaveStorage(model.Storage{ID: "ol1", Name: "ol", Type: model.StorageOpenList, BaseURL: ol.URL, Token: "t", LocalRoot: "/mnt/cloud"})
+	_ = st.SaveMediaFile(model.MediaFile{ID: "flocal", ItemID: "m1", Source: model.SrcStrm, StrmRaw: "/mnt/cloud/媒体/A.mkv"})
+
+	code, body := do(http.MethodGet, "/api/items/flocal/play", "")
+	if code != http.StatusOK {
+		t.Fatalf("play 期望 200，得到 %d (%s)", code, body)
+	}
+	var d struct {
+		Level int    `json:"level"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatalf("解析: %v (%s)", err, body)
+	}
+	if d.Level != 2 {
+		t.Fatalf("本地路径 strm 应 L2 页内播，得到 level=%d (%s)", d.Level, body)
+	}
+	if !strings.Contains(d.URL, "/api/play/remux?u=") {
+		t.Fatalf("应指向 remux 端点，得到 %q", d.URL)
+	}
+	// remux 的 u 参数应是映射后的内部路径 /媒体/A.mkv（URL 编码为 %2F%E5%AA%92%E4%BD%93%2FA.mkv）
+	if !strings.Contains(d.URL, "%E5%AA%92%E4%BD%93") {
+		t.Fatalf("remux 的 u 应含映射后的内部路径「媒体」，得到 %q", d.URL)
+	}
+}
+
+// TestPlay_StrmLocalPath_ProbeFallback 锁定零配置兜底：本地路径型 strm 但存储
+// 没配 LocalRoot。resolver 把整路径当内部路径兜底，playItem 的 resolveOpenListLink
+// 逐级剥前缀（/mnt/cloud/媒体/A.mkv → /cloud/媒体/A.mkv → /媒体/A.mkv）回退探测，
+// 命中即页内播——用户无需任何配置。
+func TestPlay_StrmLocalPath_ProbeFallback(t *testing.T) {
+	st, do := featureFixture(t)
+	ol := mockOpenListFS(t, "/媒体/A.mkv")
+	defer ol.Close()
+	_ = st.SaveStorage(model.Storage{ID: "ol1", Name: "ol", Type: model.StorageOpenList, BaseURL: ol.URL, Token: "t"})
+	_ = st.SaveMediaFile(model.MediaFile{ID: "flocal2", ItemID: "m1", Source: model.SrcStrm, StrmRaw: "/mnt/cloud/媒体/A.mkv"})
+
+	code, body := do(http.MethodGet, "/api/items/flocal2/play", "")
+	if code != http.StatusOK {
+		t.Fatalf("play 期望 200，得到 %d (%s)", code, body)
+	}
+	var d struct {
+		Level int    `json:"level"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatalf("解析: %v (%s)", err, body)
+	}
+	if d.Level != 2 {
+		t.Fatalf("零配置兜底应仍能 L2 页内播，得到 level=%d (%s)", d.Level, body)
+	}
+	if !strings.Contains(d.URL, "/api/play/remux?u=") {
+		t.Fatalf("应指向 remux 端点，得到 %q", d.URL)
 	}
 }

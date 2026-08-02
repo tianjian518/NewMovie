@@ -108,7 +108,7 @@ function TranscodePanel() {
 function StoragePanel() {
   const [list, setList] = useState<Storage[]>([]);
   const [editingID, setEditingID] = useState("");
-  const [form, setForm] = useState({ name: "", type: "openlist", base_url: "http://openlist:5244", token: "", sign_key: "", rate_limit: 2 });
+  const [form, setForm] = useState({ name: "", type: "openlist", base_url: "http://openlist:5244", token: "", sign_key: "", rate_limit: 2, local_root: "" });
   const [msg, setMsg] = useState("");
 
   const load = () => api.listStorages().then(setList).catch(() => {});
@@ -116,12 +116,12 @@ function StoragePanel() {
 
   function resetForm() {
     setEditingID("");
-    setForm({ name: "", type: "openlist", base_url: "http://openlist:5244", token: "", sign_key: "", rate_limit: 2 });
+    setForm({ name: "", type: "openlist", base_url: "http://openlist:5244", token: "", sign_key: "", rate_limit: 2, local_root: "" });
     setMsg("");
   }
   function edit(s: Storage) {
     setEditingID(s.id);
-    setForm({ name: s.name, type: s.type, base_url: s.base_url, token: s.token, sign_key: s.sign_key, rate_limit: s.rate_limit });
+    setForm({ name: s.name, type: s.type, base_url: s.base_url, token: s.token, sign_key: s.sign_key, rate_limit: s.rate_limit, local_root: s.local_root || "" });
     setMsg("");
   }
   async function test() {
@@ -163,6 +163,7 @@ function StoragePanel() {
         <input className="w-full bg-ink rounded p-2" placeholder="API Token" value={form.token} onChange={(e) => setForm({ ...form, token: e.target.value })} />
         <input className="w-full bg-ink rounded p-2" placeholder="签名密钥（后台『签名所有』，留空表示关闭签名）" value={form.sign_key} onChange={(e) => setForm({ ...form, sign_key: e.target.value })} />
         <input className="w-full bg-ink rounded p-2" type="number" placeholder="限速 req/s（默认 2）" value={form.rate_limit} onChange={(e) => setForm({ ...form, rate_limit: Number(e.target.value) })} />
+        <input className="w-full bg-ink rounded p-2" placeholder="本地挂载根（可选）。如 /mnt/cloud。与 .strm 里写的本地路径前缀一致即可让本地路径型 strm 页内播放" value={form.local_root} onChange={(e) => setForm({ ...form, local_root: e.target.value })} />
         <div className="flex gap-2">
           <button onClick={test} className="bg-panel rounded px-3 py-1 text-sm">测试连接</button>
           <button onClick={save} className="bg-brand rounded px-3 py-1 text-sm">{editingID ? "更新" : "保存"}</button>
