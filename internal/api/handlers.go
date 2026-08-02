@@ -35,7 +35,7 @@ import (
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.9"
+const Version = "1.1.10"
 
 // Server 持有依赖。
 type Server struct {
@@ -447,7 +447,7 @@ func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 	cl := &openlist.Client{BaseURL: body.BaseURL, Token: body.Token, SignKey: body.SignKey}
 	drives, err := cl.ListDrives()
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "连接失败: "+err.Error())
+		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "drives": drives})

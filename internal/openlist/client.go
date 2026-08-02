@@ -291,11 +291,39 @@ func (c *Client) ReadText(p string) (string, error) {
 	return string(b), nil
 }
 
-// do 通用带鉴权请求。
+// do 通用带鉴权请求，并对瞬时故障自动重试。
+//
+// OpenList 在扫描大目录时可能因网络抖动、反向代理（Nginx/Caddy）502/504、或
+// TLS 中途断开而偶发返回非 JSON 内容（HTML 错误页、空响应）。旧实现把这类响应
+// 直接喂给 json.Unmarshal，于是用户看到一串莫名其妙的
+// `invalid character '<' looking for beginning of value`。这里：
+//   - 识别「非 JSON / 空 / 5xx」并翻译成人话，不再暴露底层解析报错；
+//   - 对瞬时类错误（连接重置、TLS 中断、代理抽风、5xx）重试几次再放弃，
+//     让偶发断连自愈，而不是一抖就整个媒体库扫描失败。
 func (c *Client) do(api string, body []byte) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= openlistMaxRetries; attempt++ {
+		raw, err := c.tryOnce(api, body)
+		if err == nil {
+			return raw, nil
+		}
+		lastErr = err
+		// 持久错误（路径错、鉴权失败、OpenList 业务码非 200）不重试，立刻返回。
+		if !isTransient(err) {
+			return nil, err
+		}
+		if attempt < openlistMaxRetries {
+			time.Sleep(time.Duration(attempt) * openlistRetryBackoff)
+		}
+	}
+	return nil, lastErr
+}
+
+// tryOnce 执行单次请求并读取响应；返回可读错误，瞬时类错误带 transient 标记以便 do() 重试。
+func (c *Client) tryOnce(api string, body []byte) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(c.BaseURL, "/")+api, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, &olErr{msg: "构造请求失败：" + err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.Token != "" {
@@ -303,24 +331,70 @@ func (c *Client) do(api string, body []byte) ([]byte, error) {
 	}
 	resp, err := c.http().Do(req)
 	if err != nil {
-		return nil, err
+		// 网络层瞬时错误（connection reset / TLS 中断 / 代理抽风）应重试。
+		return nil, &olErr{
+			msg:       "OpenList 连接失败（" + err.Error() + "），请检查地址是否可达、网络是否稳定",
+			transient: true,
+		}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return nil, &olErr{
+			msg:       fmt.Sprintf("OpenList 返回 %d，服务可能临时不可用或被反向代理拦截", resp.StatusCode),
+			transient: true,
+		}
+	}
 	// 加读取上限：目录列表接口的响应大小由对端决定，一个塞了几十万文件的
 	// 目录（或一台被替换掉的恶意 OpenList）能直接把内存吃光。
 	// 32MB 足够放下任何正常的 fs/list 响应。
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if err != nil {
-		return nil, err
+		return nil, &olErr{msg: "读取 OpenList 响应失败：" + err.Error(), transient: true}
 	}
 	if int64(len(b)) >= maxRespBytes {
 		return nil, fmt.Errorf("openlist %s: 响应超过 %dMB 上限，疑似目录过大或对端异常", api, maxRespBytes>>20)
 	}
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" {
+		return nil, &olErr{msg: "OpenList 返回了空响应，可能是连接中途断开", transient: true}
+	}
+	// 响应体以 '<' 开头（HTML 错误页 / 代理报错页）或明显不是 JSON →
+	// 视为瞬时错误重试，避免把 `invalid character '<'...` 这种底层报错丢给用户。
+	if trimmed[0] == '<' {
+		return nil, &olErr{
+			msg:       "OpenList 返回的不是 JSON（可能是连接中断、被反向代理拦截，或返回了错误页），请检查 OpenList 服务是否在线",
+			transient: true,
+		}
+	}
 	return b, nil
+}
+
+// olErr 是客户端的可读错误；transient=true 表示瞬时故障、do() 应重试。
+type olErr struct {
+	msg       string
+	transient bool
+}
+
+func (e *olErr) Error() string { return e.msg }
+func (e *olErr) Temporary() bool { return e.transient }
+
+func isTransient(err error) bool {
+	if e, ok := err.(*olErr); ok {
+		return e.transient
+	}
+	return false
 }
 
 // maxRespBytes 单次 API 响应最大读取字节数。
 const maxRespBytes int64 = 32 << 20
+
+// openlistMaxRetries / openlistRetryBackoff 瞬时故障的重试次数与退避步长。
+// 扫描大目录时 OpenList 偶发断连很常见，重试 3 次（累计约 0.8~1.2s）即可自愈，
+// 又不至于在 OpenList 真挂掉时无限拖延。
+const (
+	openlistMaxRetries  = 3
+	openlistRetryBackoff = 400 * time.Millisecond
+)
 
 // ---- 签名 ----
 

@@ -7,6 +7,7 @@ import Detail from "./pages/Detail";
 import Player from "./pages/Player";
 import Settings from "./pages/Settings";
 import PosterCard from "./components/PosterCard";
+import PosterRow from "./components/PosterRow";
 import { stripJson } from "./components/DirPicker";
 
 // Login 通过 onLogin 回调把 token 交回给 App，触发重新渲染。
@@ -111,50 +112,76 @@ function ContinuePage() {
   );
 }
 
-// 首页仪表盘：继续观看 + 最近添加 + 媒体库入口，向 Emby 的「首页」体验靠拢。
+// 续播卡片（带进度条），用于首页「继续观看」横滑行。
+function ContinueCard({ r }: { r: ContinueRow }) {
+  const pct = r.duration > 0 ? Math.min(100, Math.round((r.position / r.duration) * 100)) : 0;
+  const label = r.episode_no > 0
+    ? (r.season_no > 1 ? `S${r.season_no}E${r.episode_no}` : `第 ${r.episode_no} 集`)
+    : "";
+  return (
+    <Link to={"/play/" + r.file_id} className="shrink-0 w-32 sm:w-36 snap-start block group">
+      {r.item ? <PosterCard item={r.item} /> :
+        <div className="aspect-[2/3] bg-card rounded-lg flex items-center justify-center text-xs text-gray-500 p-2 text-center">{r.file_name}</div>}
+      <div className="h-1 bg-white/10 rounded mt-1.5">
+        <div className="h-full bg-brand rounded" style={{ width: pct + "%" }} />
+      </div>
+      <div className="text-xs text-gray-400 mt-1 truncate">
+        {label && <span className="text-brand mr-1">{label}</span>}
+        {fmtTime(r.position)} / {fmtTime(r.duration)}
+      </div>
+    </Link>
+  );
+}
+
+const modeLabel = (m: string) =>
+  ({ native: "原生", strm: "STRM", mixed: "混合" } as Record<string, string>)[m] || m;
+
+// 首页：参考网易爆米花 / 飞牛影视的「行式海报墙」布局。
+//  - 继续观看、最近添加都是单行横滑，不再占满整屏；
+//  - 每个媒体库直接在首页展示自己的「海报行」，点库名进详情，不必点进去才看得到海报墙。
 function Dashboard() {
   const [cont, setCont] = useState<ContinueRow[]>([]);
   const [recent, setRecent] = useState<MediaItem[]>([]);
   const [libs, setLibs] = useState<LibraryType[]>([]);
+  // 每个媒体库的最近添加条目，按库 ID 归集，用于首页直接铺海报行。
+  const [libItems, setLibItems] = useState<Record<string, MediaItem[]>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
     Promise.all([
       api.listContinue().then(setCont).catch(() => {}),
-      api.search({ sort: "recent", limit: 24 }).then(setRecent).catch(() => {}),
+      api.search({ sort: "recent", limit: 18 }).then(setRecent).catch(() => {}),
       api.listLibraries().then(setLibs).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, []);
 
-  const modeLabel = (m: string) =>
-    ({ native: "原生模式", strm: "STRM 模式", mixed: "混合模式" } as Record<string, string>)[m] || m;
+  // 各媒体库最近添加：并发拉取，按库归集成字典；任一库失败不影响其它库。
+  useEffect(() => {
+    if (libs.length === 0) return;
+    let alive = true;
+    Promise.all(
+      libs.map((l) =>
+        api.search({ library: l.id, sort: "recent", limit: 12 })
+          .then((items) => [l.id, items] as const)
+          .catch(() => [l.id, [] as MediaItem[]] as const),
+      ),
+    ).then((pairs) => {
+      if (!alive) return;
+      const map: Record<string, MediaItem[]> = {};
+      for (const [id, items] of pairs) map[id] = items;
+      setLibItems(map);
+    });
+    return () => { alive = false; };
+  }, [libs]);
 
   return (
     <div className="space-y-8">
       {cont.length > 0 && (
         <section>
           <h2 className="text-xl font-bold mb-3">继续观看</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-            {cont.map((r) => {
-              const pct = r.duration > 0 ? Math.min(100, Math.round((r.position / r.duration) * 100)) : 0;
-              const label = r.episode_no > 0
-                ? (r.season_no > 1 ? `S${r.season_no}E${r.episode_no}` : `第 ${r.episode_no} 集`)
-                : "";
-              return (
-                <Link key={r.id} to={"/play/" + r.file_id} className="block group">
-                  {r.item ? <PosterCard item={r.item} /> :
-                    <div className="aspect-[2/3] bg-card rounded-lg flex items-center justify-center text-xs text-gray-500 p-2 text-center">{r.file_name}</div>}
-                  <div className="h-1 bg-white/10 rounded mt-1.5">
-                    <div className="h-full bg-brand rounded" style={{ width: pct + "%" }} />
-                  </div>
-                  <div className="text-xs text-gray-400 mt-1 truncate">
-                    {label && <span className="text-brand mr-1">{label}</span>}
-                    {fmtTime(r.position)} / {fmtTime(r.duration)}
-                  </div>
-                </Link>
-              );
-            })}
+          <div className="flex gap-3 overflow-x-auto pb-2 snap-x">
+            {cont.map((r) => <ContinueCard key={r.id} r={r} />)}
           </div>
         </section>
       )}
@@ -162,31 +189,28 @@ function Dashboard() {
       <section>
         <h2 className="text-xl font-bold mb-3">最近添加</h2>
         {loading ? <p className="text-gray-400 text-sm">加载中…</p> :
-          recent.length === 0 ? <p className="text-gray-500 text-sm">还没有内容，去「媒体库」扫描导入吧。</p> :
-            <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-4">
-              {recent.map((it) => (
-                <Link key={it.id} to={"/item/" + it.id}><PosterCard item={it} /></Link>
-              ))}
-            </div>}
+          <PosterRow items={recent} empty="还没有内容，去「媒体库」扫描导入吧。" />}
       </section>
 
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xl font-bold">媒体库</h2>
-          <Link to="/libraries" className="text-sm text-blue-400">管理媒体库 →</Link>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {libs.map((l) => (
-            <Link key={l.id} to={"/library/" + l.id} className="bg-card rounded-lg p-5 hover:ring-2 hover:ring-brand">
-              <div className="text-lg font-semibold">{l.name}</div>
-              <div className="text-xs text-gray-400 mt-2">{modeLabel(l.mode)} · {l.root_path}</div>
+      {libs.map((l) => (
+        <section key={l.id}>
+          <div className="flex items-baseline justify-between mb-3">
+            <Link to={"/library/" + l.id} className="text-lg font-bold hover:text-brand">
+              {l.name}
+              <span className="ml-2 text-xs font-normal text-gray-500 align-middle">{modeLabel(l.mode)}</span>
             </Link>
-          ))}
-          <Link to="/libraries" className="bg-card rounded-lg p-5 hover:ring-2 hover:ring-brand flex items-center justify-center text-gray-400">
-            + 创建媒体库
-          </Link>
-        </div>
-      </section>
+            <Link to={"/library/" + l.id} className="text-sm text-blue-400 shrink-0 ml-3">查看全部 →</Link>
+          </div>
+          <PosterRow
+            items={libItems[l.id] || []}
+            empty="这个媒体库还是空的，去扫描导入吧。"
+          />
+        </section>
+      ))}
+
+      <div className="pt-2">
+        <Link to="/libraries" className="text-sm text-blue-400">管理媒体库 / 创建媒体库 →</Link>
+      </div>
     </div>
   );
 }

@@ -190,8 +190,8 @@ func FriendlyErr(root string, err error) string {
 		return fmt.Sprintf("网盘里找不到路径「%s」。请确认它是 OpenList 内部路径（以挂载点开头，如 /115/影视），而不是本地路径或带域名的网址。", root)
 	case strings.Contains(low, "unauthorized"), strings.Contains(low, "401"), strings.Contains(low, "token"):
 		return "OpenList 鉴权失败，请回到「设置」重新填写 Token 并测试连接。"
-	case strings.Contains(low, "connection refused"), strings.Contains(low, "no such host"), strings.Contains(low, "timeout"), strings.Contains(low, "deadline"):
-		return fmt.Sprintf("连不上 OpenList（%v）。请检查地址是否可达、容器之间网络是否互通。", err)
+	case strings.Contains(low, "连接失败"), strings.Contains(low, "返回的不是 json"), strings.Contains(low, "返回了空响应"), strings.Contains(low, "返回 5"), strings.Contains(low, "connection refused"), strings.Contains(low, "no such host"), strings.Contains(low, "timeout"), strings.Contains(low, "deadline"):
+		return fmt.Sprintf("连不上 OpenList（%v）。请检查地址是否可达、容器之间网络是否互通，或反向代理是否拦截了请求。", err)
 	case strings.Contains(low, "context canceled"):
 		return "扫描被中断。"
 	}
