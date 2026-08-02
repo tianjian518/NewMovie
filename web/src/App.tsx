@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Routes, Route, Link, useNavigate, useParams } from "react-router-dom";
+import { Routes, Route, Link, NavLink, useNavigate, useParams } from "react-router-dom";
 import { api, getToken, setToken, clearToken } from "./api";
 import type { MediaItem, ScanJob, ContinueRow, FavoriteRow, Library as LibraryType } from "./types";
 import Library from "./pages/Library";
@@ -425,6 +425,94 @@ function ScanDiagnostics({ job }: { job: ScanJob | null }) {
   );
 }
 
+// ---- 响应式导航：桌面用左侧窄栏，手机用底部标签栏（仿飞牛影视 / 爆米花）----
+// 以前是固定 192px 的 <aside>，手机上直接撑爆、毫无适配。
+// 现在桌面保留较窄（w-44）的左侧栏，<md 时收起，改为固定在底部的标签栏。
+
+type IconProps = { className?: string };
+const icHome = ({ className }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5" />
+  </svg>
+);
+const icLib = ({ className }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="7.5" height="7.5" rx="1.2" /><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.2" />
+    <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.2" /><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.2" />
+  </svg>
+);
+const icFav = ({ className }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 20.5S4 15.7 4 9.8A4.3 4.3 0 0 1 12 7a4.3 4.3 0 0 1 8 2.8c0 5.9-8 10.7-8 10.7Z" />
+  </svg>
+);
+const icSet = ({ className }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5 5l1.8 1.8M17.2 17.2 19 19M19 5l-1.8 1.8M6.8 17.2 5 19" />
+  </svg>
+);
+
+const navItems = [
+  { to: "/", label: "首页", Icon: icHome, end: true },
+  { to: "/libraries", label: "媒体库", Icon: icLib, end: false },
+  { to: "/favorites", label: "收藏", Icon: icFav, end: false },
+  { to: "/settings", label: "设置", Icon: icSet, end: false },
+];
+
+// 桌面左侧窄栏（md 及以上显示）。
+function Sidebar({ onLogout }: { onLogout: () => void }) {
+  return (
+    <aside className="hidden md:flex w-44 bg-panel p-4 space-y-1 shrink-0 flex-col border-r border-white/5">
+      <div className="text-lg font-bold mb-5 px-3">NewMovie</div>
+      {navItems.map(({ to, label, Icon, end }) => (
+        <NavLink
+          key={to}
+          to={to}
+          end={end}
+          className={({ isActive }) =>
+            "flex items-center gap-3 px-3 py-2 rounded-lg text-sm " +
+            (isActive ? "bg-brand/15 text-brand font-medium" : "text-gray-300 hover:bg-card")
+          }
+        >
+          <Icon className="w-5 h-5 shrink-0" />
+          {label}
+        </NavLink>
+      ))}
+      <button
+        onClick={onLogout}
+        className="mt-auto text-left px-3 py-2 rounded-lg text-sm text-gray-500 hover:bg-card hover:text-gray-300"
+      >
+        退出登录
+      </button>
+    </aside>
+  );
+}
+
+// 手机底部标签栏（<md 显示），仿飞牛影视：图标 + 文字，等宽分布。
+function BottomNav() {
+  return (
+    <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-panel/95 backdrop-blur border-t border-white/10 pb-[env(safe-area-inset-bottom)]">
+      <div className="flex">
+        {navItems.map(({ to, label, Icon, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className={({ isActive }) =>
+              "flex-1 flex flex-col items-center gap-0.5 py-2 text-[11px] " +
+              (isActive ? "text-brand" : "text-gray-400")
+            }
+          >
+            <Icon className="w-6 h-6" />
+            {label}
+          </NavLink>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
 export default function App() {
   // token 必须是可更新的 state：登录成功后调用 setTok 才会重新渲染进主界面。
   const [token, setTok] = useState(getToken());
@@ -460,18 +548,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex">
-      <aside className="w-48 bg-panel p-4 space-y-2 shrink-0 flex flex-col">
-        <div className="text-xl font-bold mb-6">NewMovie</div>
-        <Link className="block px-3 py-2 rounded hover:bg-card" to="/">首页</Link>
-        <Link className="block px-3 py-2 rounded hover:bg-card" to="/continue">继续观看</Link>
-        <Link className="block px-3 py-2 rounded hover:bg-card" to="/favorites">收藏</Link>
-        <Link className="block px-3 py-2 rounded hover:bg-card" to="/libraries">媒体库</Link>
-        <Link className="block px-3 py-2 rounded hover:bg-card" to="/settings">设置</Link>
-        <button onClick={logout} className="mt-auto text-left px-3 py-2 rounded text-gray-400 hover:bg-card hover:text-gray-200">
-          退出登录
-        </button>
-      </aside>
-      <main className="flex-1 p-6 overflow-auto">
+      <Sidebar onLogout={logout} />
+      {/* 手机端底部标签栏占位：main 加底部内边距，避免内容被遮挡 */}
+      <main className="flex-1 p-4 sm:p-6 pb-20 md:pb-6 overflow-auto">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/continue" element={<ContinuePage />} />
@@ -483,6 +562,7 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
+      <BottomNav />
     </div>
   );
 }
