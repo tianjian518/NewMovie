@@ -26,6 +26,7 @@ export default function Player() {
   const [resumed, setResumed] = useState(0);
   const [subLang, setSubLang] = useState("off");
   const [audIdx, setAudIdx] = useState(-1);
+  const [playErr, setPlayErr] = useState("");
   const ref = useRef<HTMLDivElement>(null);
   const artRef = useRef<any>(null);
 
@@ -75,7 +76,9 @@ export default function Player() {
 
   useEffect(() => {
     if (!dec || !ref.current) return;
-    if ((dec.level === 0 || dec.level === 1 || dec.level === 2) && dec.url) {
+    setPlayErr("");
+    // L0 直链 / L1 代理 / L2 重封装 / L3 转码 都走页内 ArtPlayer。
+    if ((dec.level === 0 || dec.level === 1 || dec.level === 2 || dec.level === 3) && dec.url) {
       const art = new ArtPlayer({
         container: ref.current,
         url: dec.url,
@@ -85,6 +88,13 @@ export default function Player() {
         subtitle: { encoding: "utf-8" },
       });
       artRef.current = art;
+
+      // 视频加载/解码失败（如浏览器无 HEVC 解码器）：给出明确引导，而不是一片黑。
+      const onErr = () => {
+        setPlayErr("视频加载失败：可能是浏览器不支持该编码（如 HEVC/H.265）。可在「设置」开启「允许视频转码(HEVC→H.264)」后重试，或点下方用外部播放器打开。");
+      };
+      art.on("error", onErr);
+      if (art.video) art.video.addEventListener("error", onErr);
 
       // 续播：进度一直在往后端存，这次接上，从断点接着放。
       const resume = dec.resume_position || 0;
@@ -180,7 +190,7 @@ export default function Player() {
         </div>
       )}
 
-      {(dec.level === 0 || dec.level === 1 || dec.level === 2) && dec.url ? (
+      {(dec.level === 0 || dec.level === 1 || dec.level === 2 || dec.level === 3) && dec.url ? (
         <div ref={ref} className="w-full aspect-video bg-black rounded-xl" />
       ) : (
         <div className="aspect-video bg-card rounded-xl flex flex-col items-center justify-center gap-3 text-center p-6">
@@ -197,9 +207,14 @@ export default function Player() {
         </div>
       )}
 
-      {ext && (dec.level === 0 || dec.level === 1 || dec.level === 2) && (
+      {ext && (dec.level === 0 || dec.level === 1 || dec.level === 2 || dec.level === 3) && (
         <div className="mt-3">
           <a href={ext} target="_blank" rel="noreferrer" className="text-sm text-blue-400">或在新窗口用外部播放器打开</a>
+        </div>
+      )}
+      {playErr && (
+        <div className="mt-3 bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-sm text-red-300">
+          {playErr}
         </div>
       )}
     </div>

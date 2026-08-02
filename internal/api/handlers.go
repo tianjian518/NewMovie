@@ -30,12 +30,13 @@ import (
 	"newmovie/internal/scanner"
 	"newmovie/internal/scraper"
 	"newmovie/internal/store"
+	"newmovie/internal/strm"
 	"newmovie/internal/subtitle"
 	"newmovie/internal/tmdb"
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
-const Version = "1.1.12"
+const Version = "1.1.13"
 
 // Server 持有依赖。
 type Server struct {
@@ -936,6 +937,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 		s.handleRemux(w, r)
 		return
 	}
+	if len(parts) >= 3 && parts[2] == "transcode" && r.Method == http.MethodGet {
+		s.handleTranscode(w, r)
+		return
+	}
 	if len(parts) >= 3 && parts[2] == "subtitle" && r.Method == http.MethodGet {
 		s.handleSubtitle(w, r)
 		return
@@ -986,7 +991,67 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 	writeErr(w, http.StatusNotFound, "unknown play route")
 }
 
-// handleRemux 实时重封装：拉取源（受 SSRF 守卫约束），用 ffmpeg -c copy
+// allowedLocalRoot 判断本地文件路径是否落在配置的允许目录（VIDRIVE_LOCAL_ROOTS）内。
+func (s *Server) allowedLocalRoot(p string) bool {
+	clean := path.Clean(p)
+	for _, root := range s.Cfg.LocalRoots {
+		r := path.Clean(root)
+		if r == "/" {
+			continue // 不允许用根目录作为放行范围
+		}
+		if clean == r || strings.HasPrefix(clean, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// openPlaySource 打开播放源，返回可读流。支持两类来源：
+//   - http/https 远程直链：受 SSRF 守卫约束（netguard）。
+//   - file:// 本地绝对路径：供 CloudDrive2 等本地 strm 直接读盘，不经过网络。
+//
+// 返回值：(流, HTTP 状态码, 错误)。成功时状态码为 0；失败时流为 nil、状态码用于回写。
+func (s *Server) openPlaySource(r *http.Request, raw string) (io.ReadCloser, int, error) {
+	if strings.HasPrefix(raw, "file://") {
+		p := strings.TrimPrefix(raw, "file://")
+		if !path.IsAbs(p) {
+			return nil, http.StatusBadRequest, errors.New("本地文件路径必须绝对路径")
+		}
+		// 安全：本地文件读取仅放行配置目录（VIDRIVE_LOCAL_ROOTS）内的路径，
+		// 防任意文件读取（SSRF 的一种）。未配置则一律拒绝。
+		if !s.allowedLocalRoot(p) {
+			return nil, http.StatusForbidden, errors.New("本地文件路径不在允许目录内（配置 VIDRIVE_LOCAL_ROOTS）")
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, http.StatusBadGateway, fmt.Errorf("读取本地文件失败: %w", err)
+		}
+		return f, 0, nil
+	}
+	target, err := parseOutboundURL(raw)
+	if err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	client := s.proxyClientFor(target)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, http.StatusBadRequest, errors.New("构造请求失败")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, errBlockedTarget) {
+			return nil, http.StatusForbidden, errBlockedTarget
+		}
+		return nil, http.StatusBadGateway, fmt.Errorf("拉取源失败: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, http.StatusBadGateway, fmt.Errorf("源返回 %d", resp.StatusCode)
+	}
+	return resp.Body, 0, nil
+}
+
+// handleRemux 实时重封装：拉取源（受 SSRF 守卫约束，或本地文件），用 ffmpeg -c copy
 // 转成 fragmented MP4 流式回写给浏览器。仅做容器转换、不重新编码，开销极低。
 // 这样 MKV（h264/aac、hevc/aac 等）也能在页内 ArtPlayer 直接播，不必甩外部播放器。
 func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
@@ -995,32 +1060,12 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "缺少 u 参数")
 		return
 	}
-	target, err := parseOutboundURL(raw)
+	src, status, err := s.openPlaySource(r, raw)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, status, err.Error())
 		return
 	}
-	client := s.proxyClientFor(target)
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "构造请求失败")
-		return
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		if errors.Is(err, errBlockedTarget) {
-			writeErr(w, http.StatusForbidden, errBlockedTarget.Error())
-			return
-		}
-		writeErr(w, http.StatusBadGateway, "拉取源失败: "+err.Error())
-		return
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		resp.Body.Close()
-		writeErr(w, http.StatusBadGateway, "源返回 "+strconv.Itoa(resp.StatusCode))
-		return
-	}
-	defer resp.Body.Close()
+	defer src.Close()
 
 	bin, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -1028,7 +1073,6 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
 	args := []string{"-loglevel", "error", "-i", "pipe:0"}
 	// aac=1：视频保持拷贝（HEVC/H264 不变），仅把不兼容 MP4 的音轨（DTS/TrueHD/Atmos/FLAC）
 	// 实时转成 AAC。4K 蓝光原盘（HEVC + DTS-HD/TrueHD/Atmos）借此页内可播，且几乎不耗服务端算力。
@@ -1046,8 +1090,52 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args = append(args, "pipe:1")
+	s.streamFFmpeg(w, r, bin, args, src)
+}
+
+// handleTranscode 实时视频转码：拉取源，用 ffmpeg 把视频转 H.264、音轨转 AAC，
+// 输出 fragmented MP4 流式回写。用于浏览器本身解不了视频编码（如 HEVC）且开启了
+// 「允许视频转码」的场景，产物是任何浏览器都能播的 MP4，彻底解决页内播放。
+// 开销显著高于重封装（重编码视频），故默认不开启（见 TranscodeEnabled / 设置页开关）。
+func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("u")
+	if raw == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 u 参数")
+		return
+	}
+	src, status, err := s.openPlaySource(r, raw)
+	if err != nil {
+		writeErr(w, status, err.Error())
+		return
+	}
+	defer src.Close()
+
+	bin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "服务端未安装 ffmpeg，无法转码（请在镜像中安装 ffmpeg）")
+		return
+	}
+
+	// 视频转 H.264（CRF 20 近无损画质），音轨转 AAC。产物任何浏览器可播。
+	args := []string{"-loglevel", "error", "-i", "pipe:0",
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+		"-c:a", "aac", "-b:a", "192k",
+		"-movflags", "+frag_keyframe+empty_moov", "-f", "mp4"}
+	// atrack：转码时把选定音轨映射进来（视频仍转 H.264）。
+	if at := r.URL.Query().Get("atrack"); at != "" {
+		if n, err := strconv.Atoi(at); err == nil && n >= 0 {
+			args = append(args, "-map", "0:v:0", "-map", "0:a:"+strconv.Itoa(n))
+		}
+	}
+	args = append(args, "pipe:1")
+	s.streamFFmpeg(w, r, bin, args, src)
+}
+
+// streamFFmpeg 启动 ffmpeg 把 src 转封装/转码后流式写回响应。调用方负责关闭 src。
+func (s *Server) streamFFmpeg(w http.ResponseWriter, r *http.Request, bin string, args []string, src io.Reader) {
+	ctx := r.Context()
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Stdin = resp.Body
+	cmd.Stdin = src
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "启动 ffmpeg 失败")
@@ -1070,7 +1158,7 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := cmd.Wait(); err != nil && ffmpegErr.Len() > 0 {
-		log.Printf("remux ffmpeg: %s", ffmpegErr.String())
+		log.Printf("ffmpeg: %s", ffmpegErr.String())
 	}
 }
 
@@ -1265,28 +1353,92 @@ func (s *Server) saveRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 // playItem 解析单个文件，返回五级降级决策 + 直链。
+// containerExt 从 URL 或本地路径里取容器扩展名（mkv/mp4/m3u8…），忽略查询串。
+// STRM 的容器在扫描时未必能拿到，播放前用来源 URL 补一次。
+func containerExt(u string) string {
+	if i := strings.LastIndex(u, "."); i >= 0 {
+		ext := u[i+1:]
+		if q := strings.Index(ext, "?"); q >= 0 {
+			ext = ext[:q]
+		}
+		if h := strings.Index(ext, "#"); h >= 0 {
+			ext = ext[:h]
+		}
+		return strings.ToLower(ext)
+	}
+	return ""
+}
+
 func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string) {
 	f, err := s.Store.GetMediaFile(fileID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "文件不存在")
 		return
 	}
-	st, err := s.Store.GetStorage(f.StorageID)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "存储源不存在")
-		return
-	}
-	cl := s.clientFor(st)
-	link, err := cl.GetLink(f.Path, s.Cfg.ProxyRefresh) // refresh=false 复用缓存
+	// 取源：原生文件走 GetLink；STRM 先用解析器归一化出真实来源（http / openlist / file）。
+	// 这是 STRM 能在页内播放的关键——此前 playItem 对 strm 与原生文件一视同仁，
+	// 而 http 直链型 strm 的 StorageID 为空，GetStorage("") 直接报错，自然只能甩外部播放器。
 	var rawURL, directURL string
 	headers := map[string]string{}
-	if err == nil {
-		rawURL = link.Data.RawURL
-		directURL = link.Data.URL
-		headers = link.Data.Headers
-	}
-	if directURL == "" && st.SignKey != "" {
-		directURL = cl.SignedDURL(f.Path) // 自行算签名，不必让用户关签名
+
+	if f.Source == model.SrcStrm {
+		storages, _ := s.Store.ListStorages()
+		rewrites, _ := s.Store.ListPathRewrites()
+		res := strm.NewResolver(storages, rewrites).Resolve(f.StrmRaw)
+		switch res.Scheme {
+		case "http", "https":
+			rawURL = res.RawURL
+			if f.Container == "" {
+				f.Container = containerExt(res.RawURL)
+			}
+		case "openlist":
+			stID := res.StorageID
+			if stID == "" {
+				stID = f.StorageID
+			}
+			st, e := s.Store.GetStorage(stID)
+			if e != nil {
+				writeErr(w, http.StatusBadRequest, "STRM 指向的存储源不存在："+stID)
+				return
+			}
+			cl := s.clientFor(st)
+			link, e := cl.GetLink(res.Path, s.Cfg.ProxyRefresh)
+			if e == nil {
+				rawURL = link.Data.RawURL
+				directURL = link.Data.URL
+				headers = link.Data.Headers
+			}
+			if directURL == "" && st.SignKey != "" {
+				directURL = cl.SignedDURL(res.Path) // 自行算签名，不必让用户关签名
+			}
+			if f.Container == "" {
+				f.Container = containerExt(res.Path)
+			}
+		case "file":
+			rawURL = "file://" + res.Path
+			if f.Container == "" {
+				f.Container = containerExt(res.Path)
+			}
+		default:
+			writeErr(w, http.StatusBadRequest, "无法解析的 STRM 来源："+f.StrmRaw)
+			return
+		}
+	} else {
+		st, err := s.Store.GetStorage(f.StorageID)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "存储源不存在")
+			return
+		}
+		cl := s.clientFor(st)
+		link, err := cl.GetLink(f.Path, s.Cfg.ProxyRefresh) // refresh=false 复用缓存
+		if err == nil {
+			rawURL = link.Data.RawURL
+			directURL = link.Data.URL
+			headers = link.Data.Headers
+		}
+		if directURL == "" && st.SignKey != "" {
+			directURL = cl.SignedDURL(f.Path) // 自行算签名，不必让用户关签名
+		}
 	}
 
 	// 懒探测：首次播放时 ffprobe 一次，补全音轨列表/时长/编码并缓存进文件，
@@ -1316,6 +1468,13 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	if ac == "" {
 		ac = "aac"
 	}
+	// 视频转码开关：环境变量 VIDRIVE_TRANSCODE 为默认，前端「设置」里的
+	// transcode_enabled 可覆盖（持久化）。开启后 HEVC 等浏览器解不了的编码会转成
+	// H.264 页内播，彻底解决「MKV 视频不存在 / 依赖外部播放器」。
+	transcode := s.Cfg.TranscodeEnabled
+	if v, e := s.Store.GetSetting("transcode_enabled"); e == nil && (v == "1" || v == "true" || v == "on") {
+		transcode = true
+	}
 	in := playback.Input{
 		Container:        f.Container,
 		VideoCodec:       vc,
@@ -1323,22 +1482,31 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		RawURL:           rawURL,
 		DirectURL:        directURL,
 		SupportsRange:    true,
-		TranscodeEnabled: false,
+		TranscodeEnabled: transcode,
 	}
 	dec := playback.Select(in)
 
-	// L2 重封装：浏览器不认 MKV 等容器，但编码本身可播。把源交给
-	// /api/play/remux 实时 -c copy（或仅转音轨）成 MP4 流式播放，避免甩外部播放器。
-	if dec.Level == playback.L2Remux {
+	// L2 重封装 / L3 视频转码：浏览器不认 MKV 等容器，或解不了视频编码（HEVC）。
+	// 把源交给 /api/play/remux（或 /api/play/transcode）实时处理成 MP4 流式播放。
+	if dec.Level == playback.L2Remux || dec.Level == playback.L3Transcode {
 		if src := playback.PickURL(in); src != "" {
-			u := playback.RemuxURL(src)
-			// 音轨不兼容 MP4（DTS/TrueHD/Atmos）：让 remux 端点视频拷贝、音轨转 AAC。
-			if dec.NeedsAudioTranscode {
-				u += "&aac=1"
+			if dec.Level == playback.L3Transcode {
+				dec.URL = playback.TranscodeURL(src)
+			} else {
+				u := playback.RemuxURL(src)
+				// 音轨不兼容 MP4（DTS/TrueHD/Atmos）：让 remux 端点视频拷贝、音轨转 AAC。
+				if dec.NeedsAudioTranscode {
+					u += "&aac=1"
+				}
+				dec.URL = u
 			}
-			dec.URL = u
-			// 转封装流无法可靠响应 Range，页内从头播即可（fragmented mp4 仍可拖）。
+			// 重封装/转码流无法可靠响应 Range，页内从头播即可（fragmented mp4 仍可拖）。
 			dec.SupportsRange = false
+		} else {
+			// 拿不到源地址：明确报错，而不是静默返回空 URL（否则前端 ArtPlayer 报「视频不存在」）。
+			writeErr(w, http.StatusBadGateway,
+				"无法获取播放源地址（网盘直链为空，可能需开启签名、或该存储不支持取链）")
+			return
 		}
 	}
 

@@ -7,6 +7,7 @@ export default function Settings() {
   return (
     <div className="space-y-10">
       <TmdbPanel />
+      <TranscodePanel />
       <StoragePanel />
       <RewritePanel />
       <StrmTips />
@@ -61,6 +62,45 @@ function TmdbPanel() {
       </div>
       <p className="text-sm text-gray-400 mt-2">填了 Key 后，缺 NFO 的影片会自动从 TMDB 补海报/简介/评分。已刮削过的条目不会重复请求（增量缓存）。</p>
       <p className="text-sm text-gray-400">部分网络连不上 api.themoviedb.org，程序会自动改用备用地址 api.tmdb.org；都不通时再填上面的自建反代地址。</p>
+    </section>
+  );
+}
+
+// 视频转码开关：默认关（转码是 CPU 黑洞）。开启后，浏览器本身解不了的编码
+// （如 HEVC/H.265，多数 Firefox / 多数 Chrome 不带解码器）会被服务端转成 H.264 页内播，
+// 解决「MKV 点开提示视频不存在 / 只能外部播放器」的问题。持久化到 transcode_enabled。
+function TranscodePanel() {
+  const [on, setOn] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    api.getSettings().then((s) => setOn(s["transcode_enabled"] === "1")).catch(() => {});
+  }, []);
+
+  async function toggle() {
+    const next = !on;
+    setOn(next);
+    await api.saveSettings({ transcode_enabled: next ? "1" : "0" });
+    setMsg(next ? "已开启：HEVC 等编码将转成 H.264 页内播放（更吃 CPU）" : "已关闭：恢复轻量重封装，HEVC 仅 HEVC 能力浏览器可播");
+  }
+
+  return (
+    <section>
+      <h2 className="text-xl font-bold mb-3">视频转码（页内播放兜底）</h2>
+      <div className="bg-card rounded-lg p-4 space-y-3 max-w-xl">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input type="checkbox" className="mt-1" checked={on} onChange={toggle} />
+          <span>
+            <span className="font-medium">允许视频转码（HEVC→H.264）</span>
+            <p className="text-sm text-gray-400 mt-1">
+              MKV/4K 蓝光原盘多为 HEVC，多数浏览器解不了 → 重封装后仍放不出。
+              开启后服务端实时转成 H.264，任何浏览器都能页内播；代价是更吃 CPU。
+              仅在遇到「视频不存在 / 无法播放」时再开。
+            </p>
+          </span>
+        </label>
+        {msg && <p className="text-sm text-gray-400">{msg}</p>}
+      </div>
     </section>
   );
 }

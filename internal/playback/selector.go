@@ -74,6 +74,21 @@ var (
 	// mp4/mov 也纳入：当里面是 HEVC 时（浏览器原生白名单不含 h265），
 	// 走一次同封装重混流即可在页内尝试播放，避免无谓地甩外部。
 	remuxContainers = map[string]bool{"mkv": true, "ts": true, "m2ts": true, "flv": true, "mp4": true, "mov": true}
+	// 可视频转码（重编码为 H.264）的编码与容器。转码是 CPU 黑洞，仅当浏览器真解不了
+	// （如 HEVC）且用户开「允许视频转码」时才走。列表尽量宽：老编码/冷门容器都兜住。
+	// 注意：HEVC(h265) 故意不进 nativeVideo（多数浏览器不解码），但进这里——开启转码后
+	// 就能把 4K 蓝光原盘转成 H.264 页内播，不必依赖浏览器是否带 HEVC 解码器。
+	transcodableVideo = map[string]bool{
+		"h264": true, "avc": true, "hevc": true, "h265": true, "vp9": true, "av1": true,
+		"mpeg4": true, "msmpeg4v2": true, "msmpeg4": true, "mpeg2video": true,
+		"vc1": true, "wmv1": true, "wmv2": true, "wmv3": true, "wmv": true, "mjpeg": true,
+		"mpeg1video": true, "theora": true, "vp8": true, "rv40": true, "rv20": true,
+	}
+	transcodableContainers = map[string]bool{
+		"mkv": true, "mp4": true, "mov": true, "ts": true, "m2ts": true, "flv": true,
+		"avi": true, "webm": true, "wmv": true, "rmvb": true, "ogv": true, "m4v": true,
+		"3gp": true, "asf": true,
+	}
 )
 
 func norm(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -110,29 +125,43 @@ func Select(in Input) Decision {
 			URL: url, UseRawURL: useRaw, SupportsRange: in.SupportsRange}
 	}
 
-	// 非原生：先看是否只需修正容器（编码本身浏览器支持）→ L2 Remux
-	videoRemuxable := remuxVideo[vc]
+	// 浏览器能直接解的视频编码（在 <video> 里原生播）：h264/avc/vp9/av1。
+	// HEVC(h265) 故意不在此列——多数 Firefox / 多数 Chrome 不带 HEVC 解码器，
+	// 即便重封装成 MP4 也放不出（这正是用户报「视频不存在」的根因）。
+	browserDecodableVideo := nativeVideo[vc]
 	containerRemuxable := remuxContainers[c]
-	if videoRemuxable && containerRemuxable {
-		// 音轨能否原样拷进 MP4：aac/ac3/eac3/mp3/opus 可直接 -c copy；
-		// dts/truehd/atmos/flac 等装不进 MP4，必须转码音轨（见下方 NeedsAudioTranscode）。
+
+	// 1) 容器不兼容，但视频编码浏览器能解（h264/vp9/av1 等）→ L2 重封装，
+	//    音轨按需转 AAC（DTS/TrueHD 等装不进 MP4 的情况）。
+	if containerRemuxable && browserDecodableVideo {
 		if remuxAudio[ac] {
-			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4",
+			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码浏览器可解，服务端 -c copy 重封装为 MP4",
 				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
 		}
-		// 视频保留（HEVC/H264 不变），仅把不兼容 MP4 的音轨实时转成 AAC：
-		// 原画质零损失、仅极轻量音频转码，页内即可播放，不必甩外部播放器。
-		// 这正是 4K 蓝光原盘（HEVC + DTS-HD/TrueHD/Atmos）能在页内播的关键。
 		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（DTS/TrueHD 等不兼容 MP4）",
 			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
 	}
 
-	// 编码不支持：转码 或 外部播放器
-	if in.TranscodeEnabled {
-		return Decision{Level: L3Transcode, Label: "转码", Reason: "编码浏览器不支持，服务端转码",
-			URL: pickURL(in), NeedsTranscode: true, SupportsRange: in.SupportsRange}
+	// 2) 视频编码浏览器解不了（HEVC 等），但开启了转码且可转 → L3 视频转码
+	//    （HEVC→H.264 + 音轨 AAC），产物是任何浏览器都能播的 MP4，彻底解决页内播放。
+	if in.TranscodeEnabled && transcodableVideo[vc] && transcodableContainers[c] {
+		return Decision{Level: L3Transcode, Label: "转码", Reason: "编码浏览器不支持（如 HEVC），服务端转码为 H.264",
+			URL: "", UseRawURL: in.RawURL != "", NeedsTranscode: true, SupportsRange: in.SupportsRange}
 	}
-	// 默认不开转码 → 外部播放器（见 PLAN 4.5：绝不给用户一句"不支持"）
+
+	// 3) 视频编码可重封装但浏览器解不了（HEVC 等）→ 仍走 L2 重封装：
+	//    HEVC 能力浏览器（Safari、带 HEVC 扩展的 Chrome）可直接页内播。
+	//    仅当未开转码时落到这里；开了转码已在第 2 步优先转码。
+	if containerRemuxable && remuxVideo[vc] {
+		if remuxAudio[ac] {
+			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4",
+				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
+		}
+		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（DTS/TrueHD 等不兼容 MP4）",
+			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
+	}
+
+	// 4) 兜底：外部播放器（绝不给用户一句"不支持"）。
 	return Decision{Level: L4External, Label: "外部",
 		Reason: "编码不支持且未开启转码，唤起外部播放器", SupportsRange: in.SupportsRange}
 }
@@ -154,6 +183,16 @@ func RemuxURL(raw string) string {
 		return ""
 	}
 	return "/api/play/remux?u=" + url.QueryEscape(raw)
+}
+
+// TranscodeURL 把源直链转为 NewMovie 的实时视频转码端点（ffmpeg HEVC→H.264 + 音轨 AAC）。
+// 用于浏览器本身解不了视频编码（如 HEVC）且开启了「允许视频转码」的场景，
+// 产物是任何浏览器都能播的 MP4，彻底解决页内播放。
+func TranscodeURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return "/api/play/transcode?u=" + url.QueryEscape(raw)
 }
 
 // proxyPath 把直链转为 Vidrive 代理路径（前端统一请求本服务，由服务补 header）。
