@@ -67,27 +67,38 @@ func guardedDial(allowPrivate bool) func(ctx context.Context, network, addr stri
 		if allowPrivate {
 			return d.DialContext(ctx, network, addr)
 		}
-		host, _, err := net.SplitHostPort(addr)
+		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
 		ip := net.ParseIP(host)
 		if ip == nil {
-			// Transport 传进来的一般已经是 IP；万一不是，自己解析后逐个校验。
+			// Transport 传进来的可能是主机名（自定义 DialContext 下不会预解析）。
+			// 这里自己解析、逐个校验，**并挑出一个通过校验的 IP 直接去 dial**，
+			// 绝不能再用原始主机名 dial —— 否则会二次解析，DNS rebinding 能在
+			// 「校验」和「建连」之间把域名指向内网，绕过全部校验（TOCTOU）。
 			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 			if err != nil {
 				return nil, err
 			}
+			var chosen net.IP
 			for _, cand := range ips {
 				if isBlockedIP(cand) {
 					return nil, errBlockedTarget
 				}
+				if chosen == nil {
+					chosen = cand
+				}
 			}
-			return d.DialContext(ctx, network, addr)
+			if chosen == nil {
+				return nil, errBlockedTarget
+			}
+			return d.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
 		}
 		if isBlockedIP(ip) {
 			return nil, errBlockedTarget
 		}
+		// host 本身就是 IP，addr 已是 ip:port，不会再解析，直接 dial。
 		return d.DialContext(ctx, network, addr)
 	}
 }

@@ -1035,6 +1035,22 @@ func (s *Server) testTMDB(w http.ResponseWriter, r *http.Request) {
 
 // --- 播放 ---
 
+// proxySkipHeaders 反代上游响应时应丢弃的头：逐跳头、Set-Cookie，
+// 以及 Content-Length（由服务端按实际写出字节重算）。键为 CanonicalHeaderKey 形式。
+var proxySkipHeaders = map[string]bool{
+	"Connection":         true,
+	"Proxy-Connection":   true,
+	"Keep-Alive":         true,
+	"Proxy-Authenticate": true,
+	"Proxy-Authorization": true,
+	"Te":                 true,
+	"Trailer":            true,
+	"Transfer-Encoding":  true,
+	"Upgrade":            true,
+	"Set-Cookie":         true,
+	"Content-Length":     true,
+}
+
 // handlePlay 仅处理 /api/play/proxy（直链代理转发，L1）。
 // 单文件播放决策走 /api/items/:id/play（见 playItem）。
 func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []string) {
@@ -1080,7 +1096,17 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 			return
 		}
 		defer resp.Body.Close()
+		// 只透传「端到端」头，丢弃逐跳头与可能造成问题的头：
+		//   - Connection/Keep-Alive/Te/Trailer/Transfer-Encoding/Upgrade 等逐跳头
+		//     绝不该原样转发。
+		//   - Set-Cookie 落到 NewMovie 域名会让后端随意给前端种 Cookie。
+		//   - Content-Length 不转发，改由服务端按实际写出字节重算：否则上游的
+		//     声明长度与实际 io.Copy 写出不符会触发 "wrote more than declared" panic；
+		//     Range 响应里 Content-Range 仍保留，播放器拖拽不受影响。
 		for k, vs := range resp.Header {
+			if proxySkipHeaders[http.CanonicalHeaderKey(k)] {
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}

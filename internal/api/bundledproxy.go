@@ -58,6 +58,23 @@ func NewBundledProxy(target string) http.Handler {
 			log.Printf("[bundled] 反代 %s 失败：%v", r.URL.Path, err)
 			http.Error(w, "内置网盘暂不可用，请稍后重试", http.StatusBadGateway)
 		},
+		// OpenList 的 3xx 重定向（/@login、/ 等）如果在反代层不重写 Location，
+		// 浏览器会直接跳到 /@login 而不是 /openlist/@login，落在外层前缀之外
+		// → 404 白屏。同样要把指向后端自身（127.0.0.1:5244）的绝对 URL 改写成
+		// 客户端可见的前缀，否则浏览器去直连未对外暴露的后端端口 → 连不上。
+		ModifyResponse: func(resp *http.Response) error {
+			if loc := resp.Header.Get("Location"); loc != "" {
+				if newLoc, ok := rewriteProxyLocation(loc, u); ok {
+					resp.Header.Set("Location", newLoc)
+				}
+			}
+			if cl := resp.Header.Get("Content-Location"); cl != "" {
+				if newLoc, ok := rewriteProxyLocation(cl, u); ok {
+					resp.Header.Set("Content-Location", newLoc)
+				}
+			}
+			return nil
+		},
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,4 +86,47 @@ func NewBundledProxy(target string) http.Handler {
 		}
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// rewriteProxyLocation 把 OpenList 在反代之后产生的「相对/绝对」重定向位置，
+// 重写回客户端可见的 /openlist 前缀之下，避免浏览器跳出前缀导致 404。
+//
+// 规则：
+//   - 已经是带前缀的路径：原样返回，避免重复加前缀。
+//   - 绝对路径（/@login、/）：加上 /openlist 前缀。
+//   - 绝对 URL 且指向后端自身（target.Host，如 127.0.0.1:5244）：
+//     改写成客户端请求使用的 scheme+host + /openlist 前缀 + 原 path/query/fragment，
+//     否则浏览器会去直连未对外暴露的后端端口。
+//   - 其它绝对 URL（第三方登录回调等）：不动，交给浏览器原样跳转。
+func rewriteProxyLocation(loc string, target *url.URL) (string, bool) {
+	if loc == "" {
+		return "", false
+	}
+	// 已是带前缀路径：原样返回。
+	if loc == BundledProxyPrefix || strings.HasPrefix(loc, BundledProxyPrefix+"/") {
+		return loc, true
+	}
+	// 绝对路径重定向：加前缀即可。
+	if strings.HasPrefix(loc, "/") {
+		return BundledProxyPrefix + loc, true
+	}
+	// 仅当指向内置后端自身时才改写绝对 URL。
+	u, err := url.Parse(loc)
+	if err != nil || !u.IsAbs() {
+		return "", false
+	}
+	if u.Host != target.Host {
+		return "", false
+	}
+	// 关键：不能用 resp.Request.Host 拼绝对 URL——那是反代发往后端的请求，
+	// Host 是后端自身（如 127.0.0.1:5244），拼出来会把浏览器指回未暴露的后端端口。
+	// 改成同源根相对路径 /openlist/...，由浏览器按当前页面源解析即可。
+	out := BundledProxyPrefix + u.Path
+	if u.RawQuery != "" {
+		out += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		out += "#" + u.Fragment
+	}
+	return out, true
 }

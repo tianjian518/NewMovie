@@ -159,3 +159,100 @@ func TestBundledProxy_PreservesQuery(t *testing.T) {
 		t.Errorf("查询串 = %q，期望 sign=abc:123", gotQuery)
 	}
 }
+
+// 反代必须重写 OpenList 的 3xx Location。否则浏览器会跳到 /@login 而非
+// /openlist/@login，落在外层前缀之外 → 404 白屏。
+func TestBundledProxy_RewritesRedirectLocation(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/me" {
+			w.Header().Set("Location", "/@login?redirect=%2F")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewBundledProxy(backend.URL)
+	mux := http.NewServeMux()
+	mux.Handle(BundledProxyPrefix+"/", p)
+	front := httptest.NewServer(mux)
+	defer front.Close()
+
+	// 不跟随重定向，直接看改写后的 Location。
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(front.URL + "/openlist/api/me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("状态码=%d，期望 302", resp.StatusCode)
+	}
+	want := BundledProxyPrefix + "/@login?redirect=%2F"
+	if loc := resp.Header.Get("Location"); loc != want {
+		t.Errorf("Location=%q，期望 %q", loc, want)
+	}
+}
+
+// 指向后端自身（与代理 target 同 host）的绝对 URL 也要改写成客户端可见前缀，
+// 否则浏览器会直连未对外暴露的后端端口（如 5244）。
+func TestBundledProxy_RewritesAbsoluteBackendURL(t *testing.T) {
+	var backend *httptest.Server
+	backend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/root" {
+			w.Header().Set("Location", backend.URL+"/")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	p := NewBundledProxy(backend.URL)
+	mux := http.NewServeMux()
+	mux.Handle(BundledProxyPrefix+"/", p)
+	front := httptest.NewServer(mux)
+	defer front.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(front.URL + "/openlist/root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	loc := resp.Header.Get("Location")
+	backendHost := strings.TrimPrefix(strings.TrimPrefix(backend.URL, "https://"), "http://")
+	if strings.Contains(loc, backendHost) {
+		t.Errorf("Location 仍指向后端地址（%s）：%q", backendHost, loc)
+	}
+	// 应改写成同源根相对路径 /openlist/...，由浏览器按当前页面源解析，
+	// 而不是拼出后端自身地址的绝对 URL。
+	if loc != BundledProxyPrefix+"/" {
+		t.Errorf("Location=%q，期望 %q（同源根相对路径）", loc, BundledProxyPrefix+"/")
+	}
+}
+
+// 第三方绝对 URL（如 OAuth 回调）应保持原样，不应被前缀改写。
+func TestBundledProxy_KeepsExternalRedirect(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://third-party.example.com/callback?code=x")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer backend.Close()
+
+	p := NewBundledProxy(backend.URL)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, BundledProxyPrefix+"/oauth", nil))
+
+	want := "https://third-party.example.com/callback?code=x"
+	if loc := rec.Header().Get("Location"); loc != want {
+		t.Errorf("Location=%q，期望保持原样 %q", loc, want)
+	}
+}

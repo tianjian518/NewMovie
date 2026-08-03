@@ -46,6 +46,9 @@ func BootstrapBundled(st store.Store, cfg *config.Config) {
 			if err := bootstrapBundledSync(st, cfg); err == nil {
 				bundledReady.Store(true)
 				log.Printf("[bundled] 内置网盘已就绪并注册为默认存储：%s", cfg.BundledURL)
+				// 进入保活：后端一旦崩溃/被 supervisor 重启、Token 失效，
+				// 立刻复位状态并自动重新接管，UI 的「网盘挂载」状态才能反映真实情况。
+				runBundledKeepalive(st, cfg)
 				return
 			} else if attempt == 1 {
 				log.Printf("[bundled] 内置网盘接管失败：%v（后台将持续重试；期间可在「存储」里手动添加外部 OpenList）", err)
@@ -57,6 +60,34 @@ func BootstrapBundled(st store.Store, cfg *config.Config) {
 			time.Sleep(30 * time.Second)
 		}
 	}()
+}
+
+// runBundledKeepalive 周期性探测内置后端健康。探测失败时把 bundledReady 复位成
+// false（UI 据此显示「未挂载」），然后持续重试重新接管，直到再次成功。
+//
+// 为什么需要它：139cas 由 supervisord 监管，可能因 OOM / 驱动异常被重启；重启后
+// 旧的 Token 可能失效、存储记录变陈旧。原实现只在首次成功时置 true 且永不复位，
+// 于是后端早已挂掉、UI 却还显示「已挂载」，用户点进去全是报错——典型的「状态假绿」。
+func runBundledKeepalive(st store.Store, cfg *config.Config) {
+	cl := &openlist.Client{BaseURL: cfg.BundledURL}
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if perr := cl.Ping(); perr == nil {
+			continue
+		} else {
+			log.Printf("[bundled] 内置网盘健康检查失败，复位状态并尝试重新接管：%v", perr)
+		}
+		bundledReady.Store(false)
+		for {
+			if err := bootstrapBundledSync(st, cfg); err == nil {
+				bundledReady.Store(true)
+				log.Printf("[bundled] 内置网盘已重新接管：%s", cfg.BundledURL)
+				break
+			}
+			time.Sleep(5 * time.Second)
+		}
+	}
 }
 
 // bootstrapBundledSync 同步版本，供测试直接调用。
