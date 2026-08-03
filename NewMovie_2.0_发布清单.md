@@ -187,3 +187,31 @@ NewMovie 启动后在后台完成这一串，用户全程无感：
   暂不做。密码可用 `NEWMOVIE_BUNDLED_PASS` 自己指定。
 - 沙箱环境里 `github.com` 直连被 TLS 拦截，`scripts/sync-openlist.sh` 与 Dockerfile
   的前端下载都内置了 `ghproxy.net` / `gh-proxy.com` 镜像回退。
+
+## 七、2.0 代码审计与修复（PM + 高级程序员双视角走查）
+
+以「高级产品经理」看体验闭环、「高级程序员」看实现正确性，对 2.0 核心代码做了一次
+端到端走查，定位并修复了 **4 个真实 bug**（非风格问题）。全部带回归测试，已随
+`7930645` 提交并推送 `main`，并重建镜像验证。
+
+| # | 视角 | 文件 | 问题 | 修复 |
+|---|------|------|------|------|
+| 1 | 程序员 | `bundledproxy.go` | 反代不重写 3xx 的 `Location`/`Content-Location`。OpenList 的 `/@login`、根路径重定向若落到 `/openlist` 前缀之外，浏览器直接 404 白屏；指向后端自身的绝对 URL 会指向未暴露的 5244 端口。 | `ModifyResponse` 重写 `Location`：绝对路径加 `/openlist` 前缀；指向后端的绝对 URL 改写成同源根相对 `/openlist/...`（浏览器按当前源解析，绝不指回后端端口）；第三方绝对 URL 不动。 |
+| 2 | 程序员/安全 | `netguard.go` | `guardedDial` 校验完 IP 后又用**主机名**二次解析去 dial，存在 DNS-rebind TOCTOU——攻击可在「校验」与「建连」之间把域名指向内网，绕过全部 SSRF 拦截。 | 解析后挑出「已校验通过」的 IP 直接 `DialContext(ip:port)`，不再二次解析。 |
+| 3 | 产品经理 | `bootstrap.go` | `bundledReady` 首次成功后置 `true` 且**永不复位**。139cas 被 supervisor 重启 / Token 失效后，UI 仍显示「已挂载」，用户点进去全是报错——典型「状态假绿」。 | 增加 30s 保活循环：后端健康检查失败即复位状态并自动重新接管，UI 状态对齐真实情况。 |
+| 4 | 程序员 | `handlers.go` | `/api/play/proxy` 把上游响应头**逐字全拷贝**，会把上游 `Set-Cookie` 落到 NewMovie 域名、逐跳头透传、`Content-Length` 与实际写出字节不符触发 `wrote more than declared` panic。 | 只透传端到端头，丢弃 `Connection/Te/Upgrade/Transfer-Encoding/Set-Cookie/Content-Length` 等；`Content-Length` 改由服务端按实际字节重算（`Content-Range` 保留，拖拽不受影响）。 |
+
+### 验证
+
+- `go test ./internal/api/` 全量通过（新增：反代 `Location` 重写三场景、SSRF 拦截清单 `isBlockedIP`、 `guardedDial` 校验路径）。
+- 真实 Chromium 跑 `play_verify.js`：登录 → 打开播放页 → `<video>.src` 带 `token=`、
+  `remux` 200、`readyState=4`、播到结尾（2.04s）、**无 401 / 无控制台错误**。4 处修复零回退。
+- 镜像 `newmovie:2.0-test`（`82ca83bbb0`）重建并起容器 `nm2test`，`/api/health` 返回
+  `bundled_ready=true`，OpenList 管理界面各路径正常。
+
+### 交付物
+
+- 源码：`7930645` 已推送 `origin/main`（同时触发 GitHub Actions 多架构构建，推 `ghcr.io` +
+  Docker Hub）。
+- 本地镜像包：`newmovie-2.0-image.tar.gz`（`docker load` 即得 `tianjian518/newmovie:2.0` 与 `:latest`）。
+
