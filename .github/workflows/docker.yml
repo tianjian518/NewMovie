@@ -52,13 +52,13 @@ jobs:
             fi
             DH="${DH},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:full"
           fi
-          # ghcr.io（始终推送，保证多架构镜像一定能出去）
-          GH="ghcr.io/${{ github.repository }}:latest"
+          # ghcr.io（始终推送，保证多架构镜像一定能出去）；仓库名必须小写
+          GH="ghcr.io/tianjian518/newmovie:latest"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
-            GH="${GH},ghcr.io/${{ github.repository }}:${VERSION}"
+            GH="${GH},ghcr.io/tianjian518/newmovie:${VERSION}"
           fi
-          GH="${GH},ghcr.io/${{ github.repository }}:2.0"
+          GH="${GH},ghcr.io/tianjian518/newmovie:2.0"
           # 合并
           TAGS="${DH}"
           if [[ -n "$TAGS" ]]; then TAGS="${TAGS},${GH}"; else TAGS="${GH}"; fi
