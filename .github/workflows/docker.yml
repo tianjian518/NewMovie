@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Multi-arch Docker Image
 
 on:
   push:
@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write   # 用于推送到 ghcr.io（GITHUB_TOKEN 自动提供）
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,26 +22,49 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ---- Docker Hub（主目标）：需要仓库 Secrets DOCKERHUB_USERNAME / DOCKERHUB_TOKEN ----
+      # 仅在 secret 存在时登录与推送，缺 secret 也不会让整个 job 失败。
       - name: Login to Docker Hub
+        if: ${{ secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # ---- ghcr.io（兜底目标）：用 GITHUB_TOKEN，无需任何手动 secret ----
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Compute tags
         id: meta
         run: |
-          TAGS="${{ secrets.DOCKERHUB_USERNAME }}/newmovie:latest"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"   # 去掉前缀 v，得到 1.1.0（与手动推送的 1.0.0 约定一致）
-            TAGS="${TAGS},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:${VERSION}"
+          # Docker Hub
+          DH=""
+          if [[ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]]; then
+            DH="${{ secrets.DOCKERHUB_USERNAME }}/newmovie:latest"
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              VERSION="${GITHUB_REF_NAME#v}"
+              DH="${DH},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:${VERSION}"
+            fi
+            DH="${DH},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:full"
           fi
-          # :full 是含 FFmpeg 完整镜像的别名（与 :latest 同一镜像）；
-          # 历史文档/用户心智里提到的「:full 镜像」即此，确保引用仍可用。
-          TAGS="${TAGS},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:full"
+          # ghcr.io（始终推送，保证多架构镜像一定能出去）
+          GH="ghcr.io/${{ github.repository }}:latest"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            GH="${GH},ghcr.io/${{ github.repository }}:${VERSION}"
+          fi
+          GH="${GH},ghcr.io/${{ github.repository }}:2.0"
+          # 合并
+          TAGS="${DH}"
+          if [[ -n "$TAGS" ]]; then TAGS="${TAGS},${GH}"; else TAGS="${GH}"; fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build and push (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
