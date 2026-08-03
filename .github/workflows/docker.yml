@@ -12,6 +12,11 @@ jobs:
     permissions:
       contents: read
       packages: write   # 用于推送到 ghcr.io（GITHUB_TOKEN 自动提供）
+    # 把密钥映射成 env：secrets 上下文不能用于 if 条件（GitHub 服务端解析限制），
+    # 因此条件判断改用 env，避免 dispatch 时报 "Unrecognized named-value: 'secrets'"。
+    env:
+      DH_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,7 +30,7 @@ jobs:
       # ---- Docker Hub（主目标）：需要仓库 Secrets DOCKERHUB_USERNAME / DOCKERHUB_TOKEN ----
       # 仅在 secret 存在时登录与推送，缺 secret 也不会让整个 job 失败。
       - name: Login to Docker Hub
-        if: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        if: ${{ env.DH_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -44,13 +49,13 @@ jobs:
         run: |
           # Docker Hub
           DH=""
-          if [[ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]]; then
-            DH="${{ secrets.DOCKERHUB_USERNAME }}/newmovie:latest"
+          if [[ -n "${DH_TOKEN}" ]]; then
+            DH="${DH_USERNAME}/newmovie:latest"
             if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
               VERSION="${GITHUB_REF_NAME#v}"
-              DH="${DH},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:${VERSION}"
+              DH="${DH},${DH_USERNAME}/newmovie:${VERSION}"
             fi
-            DH="${DH},${{ secrets.DOCKERHUB_USERNAME }}/newmovie:full"
+            DH="${DH},${DH_USERNAME}/newmovie:full"
           fi
           # ghcr.io（始终推送，保证多架构镜像一定能出去）；仓库名必须小写
           GH="ghcr.io/tianjian518/newmovie:latest"
