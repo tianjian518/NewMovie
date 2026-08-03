@@ -51,6 +51,7 @@ jobs:
           DH=""
           if [[ -n "${DH_TOKEN}" ]]; then
             DH="${DH_USERNAME}/newmovie:latest"
+            DH="${DH},${DH_USERNAME}/newmovie:2.0"
             if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
               VERSION="${GITHUB_REF_NAME#v}"
               DH="${DH},${DH_USERNAME}/newmovie:${VERSION}"
