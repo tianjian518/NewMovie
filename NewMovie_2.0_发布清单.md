@@ -305,3 +305,69 @@ TMDB 的**元数据 API** 有内置备用域名（`api.themoviedb.org` → 失�
 
 - 源码：本节修复随本提交推送 `main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
 - 本地验证镜像：`newmovie:2.0-fix`（仅替换后端二进制，已用真实浏览器验证海报渲染）。
+
+## 十、Strm 重写 + MKV 转圈修复（Strm 仍被甩外部播放器；MKV 不再外放但无限转圈）
+
+用户反馈两条并发问题：
+
+1. **MKV 不再调用外部播放器，但点击后一直转圈，加载不出来。**
+2. **Strm 文件依然要求调用外部播放器**（即使源是可直接播的直链）。
+
+按用户要求，把 Strm 相关代码整体重写，并参考 Jellyfin / Emby / Plex / Kodi 的 Strm 处理思路：
+> Strm 本质是一行「指向媒体」的文本。播放器应**先解析出真实源，再做一次完整的播放能力判定**，
+> 而不是一上来就外放。只有当「解析失败」或「解析出的源确实浏览器无法解码且无转码」时，才降级外放。
+
+### 根因定位
+
+| # | 现象 | 根因 |
+|---|------|------|
+| A | MKV 转圈 | HEVC（H.265）在绝大多数浏览器（Chrome/Firefox）**无法用硬件/软件解码**。旧代码把 HEVC-in-MKV 走 L2 重封装，remux 只是换容器（MKV→MP4）但**保留 HEVC 编码**，产出的 HEVC-MP4 浏览器照样解不了 → `<video>` 永远 `readyState<3`、无限转圈。 |
+| B | Strm→外放 | `containerExt(u)` 用 `strings.LastIndex(u, ".")` 对**整条 URL** 取后缀。IP 主机如 `127.0.0.1:5244/...mkv` 会被截出垃圾容器 `"1:5244/..."`，导致内置后端 `127.0.0.1:5244` 的 bundled strm 容器推断全部失真。 |
+| C | Strm→外放 | `playItem` 只对 strm 的 `rawURL` 做 lazy-probe，**从不 probe `directURL`**；而大量 strm 真正可播的源在 `directURL` 上，于是漏判。 |
+| D | Strm→外放 | `probeFile` 只返回 `(dur, audio, vc, ac)`，把 ffprobe 的 `format_name` **直接丢弃**。无扩展名的 strm（如 `http://127.0.0.1:5244/stream/abcdef123`）永远学不到真实容器 → 落回 L4 外放。 |
+| E | Strm→外放 | 没有任何「未知容器兜底」分支：容器推不出时，缺少「交给浏览器直链试播」这一层，直接外放。 |
+
+### 修复
+
+**`internal/playback/selector.go`**
+
+- HEVC-in-MKV 分支（原「remux 保留 HEVC」）改为：**无转码时直接走 `L4External`**，理由文案明确告知「视频编码浏览器无法直接解码，且未开启转码，已唤起外部播放器（可在设置开启允许视频转码页内播）」。开启转码时仍走 `L3` 转码为可解码格式。
+- 在浏览器原生判定之前新增**未知容器兜底**：
+  - 有可用直链（`rawURL` 或 `directURL`）→ `L0 直链`，交浏览器试播；
+  - 无直链 → `L4External`，并给出「容器未知且无可用直链」的清晰原因。
+
+**`internal/api/handlers.go`**（Strm 解析重写）
+
+- 移除按 scheme 分头的 `containerExt` 猜测，统一为**一条解析 → Probe → 选择**链路：
+  - 解析出 `rawURL` / `directURL` / `triedPath` 三类候选源；
+  - 容器推断循环遍历 `[rawURL, directURL, triedPath, f.StrmRaw]`，任一能推出容器即用；
+  - 解析不到任何源时显式 `502「无法获取 STRM 播放源」`，不再静默外放。
+- lazy-probe 同时支持 `rawURL` 与 `directURL`（原只 `rawURL`）。
+- `containerExt(u)` 改为**只解析 URL 路径的最后一段**：先截掉 `?#`，剥掉 `scheme://`，取末尾 `/` 之后的段，若含 `:`（如 IP 主机）直接返回空 —— 彻底修掉 B 的垃圾容器。
+- `probeFile` 签名扩展为返回 `container`，ffprobe 增加 `format=format_name`；新增 `normContainer` 把 `matroska→mkv`、`mov/mp4/quicktime/m4v→mp4`、`webm→webm`、`mpegts/ts→ts`、`flv/asf/wmv/avi` 归一。无扩展名 strm 也能靠真实容器正确路由（L0/L2/转码）。
+
+### 验证
+
+- **单元测试**
+  - `internal/playback/selector_test.go`：原 4 个「HEVC→L2」错误断言改为正确预期
+    （`TestHEVC_MKV_NoTranscode_External` / `TestHEVC_MKV_AC3_NoTranscode_External` /
+    `TestHEVC_MKV_DTS_NoTranscode_External` / `TestHEVC_MKV_TrueHD_NoTranscode_External` /
+    `TestHEVCWhenTranscodeOff_External` 均断言 `L4External`）；新增
+    `TestUnknownContainer_TriesDirectPlay`（c="" + 直链 → L0）、
+    `TestUnknownContainer_NoURL_External`（c="" + 无直链 → L4）。
+  - `internal/api/handlers_strm_test.go`（新增）：
+    `TestPlay_StrmExtensionless_ProbedInPage`（无扩展 strm → ffprobe 探出容器 → L2 重封装且带音轨）、
+    `TestPlay_StrmWithExtension_Remux`（`.mkv` → L2）、
+    `TestPlay_StrmResolutionFailure_ClearError`（相对路径无可解析存储 → 400 清晰报错）、
+    `TestContainerExt_IPHost`（`127.0.0.1:5244` 类 URL 只取路径段后缀，回归 B）。
+  - `internal/api/handlers_play_test.go`：HEVC 相关播放测试改为 libx264 感知
+    （据此断言 L3 转码或 L4，绝不出现会转圈的 L2）；新增 `TestPlay_StrmHttpHEVC_NoTranscode_External`。
+- **真实浏览器 E2E**：Playwright + chromium（`/usr/bin/chromium`）跑 `play_verify_strm.js`：
+  无扩展 strm 直链 → L2 重封装 → `<video>.src` 指向 remux，`readyState=4`、`currentTime=0.41` 真实解码，
+  **无控制台/页面错误、无失败请求**，页面 `document.title = PASS_STRM` 退出 0。
+- 全量 `go build ./...` 通过；`go test ./internal/api/ ./internal/playback/` 全绿。
+
+### 交付物
+
+- 源码：`a350988` 已推送 `ghmirror/main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
+- E2E 脚本：`play_verify_strm.js`（保留为持续验证资产，判定 `PASS_STRM`）。
