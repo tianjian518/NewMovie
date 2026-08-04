@@ -1515,6 +1515,52 @@ func containerExt(u string) string {
 	return ""
 }
 
+// rewriteBundledURL 把指向内置 139cas（127.0.0.1:5244，容器内、未对外暴露）的直链
+// 改写为本服务同端口的 /openlist 反代路径。
+//
+// 2.0 同容器部署下，139cas 只监听 127.0.0.1:5244，浏览器/外部播放器跑在用户机器上，
+// 根本连不到这个容器内部地址，于是原生 MP4/Strm（L0 直链）会黑屏、缺 ffmpeg 时
+// 唤起外部播放器（L4）也会被甩到一个连不上的地址。NewMovie 在 8096 入口已挂载
+// /openlist 反代把请求转发给 5244，因此只要把下发给浏览器的 URL 改写成同源的
+// /openlist/...，浏览器就只跟 8096 打交道，由反代去取流（Range/流式都透传）。
+//
+// 仅当来源确为内置后端（s.Cfg.Bundled 且 host 等于 BundledURL 或回环地址）才改写；
+// remux/transcode 是服务端内部取流（SSRF 守卫已放行 127.0.0.1 存储源），其 u 参数
+// 里保留真实 5244 地址即可，不受本函数影响。外部 OpenList 的直链原样返回。
+func (s *Server) rewriteBundledURL(rawURL string) string {
+	if rawURL == "" || s.Cfg == nil || !s.Cfg.Bundled {
+		return rawURL
+	}
+	base, err := url.Parse(s.Cfg.BundledURL)
+	if err != nil || base.Host == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || !u.IsAbs() {
+		return rawURL
+	}
+	host := strings.ToLower(u.Hostname())
+	baseHost := strings.ToLower(base.Hostname())
+	isBundledHost := host == baseHost ||
+		host == "127.0.0.1" || host == "localhost" ||
+		host == "[::1]" || host == "::1"
+	if !isBundledHost {
+		return rawURL
+	}
+	p := u.Path
+	if p == "" {
+		p = "/"
+	}
+	out := "/openlist" + p
+	if u.RawQuery != "" {
+		out += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		out += "#" + u.Fragment
+	}
+	return out
+}
+
 func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string) {
 	f, err := s.Store.GetMediaFile(fileID)
 	if err != nil {
@@ -1649,6 +1695,17 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		TranscodeAvailable: s.transcodeOK,
 	}
 	dec := playback.Select(in)
+
+	// 2.0 修复：源若来自内置 139cas，其直链/中转链指向 127.0.0.1:5244（容器内、未对外暴露）。
+	// 浏览器与外放播放器在用户机器上连不到该地址。把「直接下发给浏览器」的 URL 改写为本服务
+	// 同端口的 /openlist 反代即可（remux/transcode 仍由服务端内部取流，不受影响）：
+	//   - L0 直链：dec.URL 当前是 5244 直链，浏览器黑屏；改写为 /openlist/... 后由反代取流。
+	//   - L4 外放：前端用 raw_url/direct_url 唤起外部播放器，同样改写为 /openlist/... 才可达。
+	if dec.Level == playback.L0Direct {
+		dec.URL = s.rewriteBundledURL(dec.URL)
+	}
+	rawURL = s.rewriteBundledURL(rawURL)
+	directURL = s.rewriteBundledURL(directURL)
 
 	// L2 重封装 / L3 视频转码：浏览器不认 MKV 等容器，或解不了视频编码（HEVC）。
 	// 把源交给 /api/play/remux（或 /api/play/transcode）实时处理成 MP4 流式播放。

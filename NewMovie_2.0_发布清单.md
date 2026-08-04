@@ -215,3 +215,50 @@ NewMovie 启动后在后台完成这一串，用户全程无感：
   Docker Hub）。
 - 本地镜像包：`newmovie-2.0-image.tar.gz`（`docker load` 即得 `tianjian518/newmovie:2.0` 与 `:latest`）。
 
+
+## 八、播放链路修复（内置后端直链不可达 → 所有 MP4/MKV/Strm 黑屏）
+
+用户反馈「所有的 MP4 或者 MKV 或者 Strm 都不能播放」。根因定位：
+
+2.0 同容器部署下，139cas 只监听 `127.0.0.1:5244`（不对外暴露），NewMovie 在 `0.0.0.0:8096`
+是唯一入口并反代 `/openlist/*`。但 `playItem` 把 139cas `GetLink` 解析出的**内部直链**
+（`http://127.0.0.1:5244/p/local/...mkv?sign=...`）直接下发给浏览器——浏览器跑在用户机器上，
+根本连不到容器内部的 `127.0.0.1:5244`，于是原生 MP4 / Strm（L0 直链）整片黑屏；缺 ffmpeg 时
+唤起外部播放器（L4）也被甩到一个连不上的地址。
+
+> 为什么 MKV 之前「看起来能播」：MKV 走 L2 重封装，remux/转码是**服务端内部取流**
+> （`openPlaySource` 经 `mediaClient` 取流，SSRF 守卫已放行 `127.0.0.1` 存储源），
+> 浏览器只跟 8096 打交道，所以这条链本就通。真正断裂的是 L0 直链（原生 MP4/Strm）
+> 与 L4 外放——它们把内部地址原样交给浏览器/外放器。
+
+### 修复
+
+新增 `rewriteBundledURL`（`handlers.go`）：当来源确为内置后端（`s.Cfg.Bundled` 且 host 等于
+`BundledURL` 或回环地址 `127.0.0.1`/`localhost`）时，把下发给浏览器/外放的 URL 改写为同源的
+`/openlist` 反代路径（反代转发到 5244，Range / 流式都透传）。仅改写「浏览器/外放拿到的那份」，
+remux/transcode 的 `u=` 参数仍保留真实 5244 地址（服务端取流用，不受影响）；外部 OpenList 的
+直链原样返回。
+
+`playItem` 在 `playback.Select` 之后统一改写：
+
+- `L0 直链`：`dec.URL` 由 `127.0.0.1:5244/...` → `/openlist/...`（浏览器只跟 8096 入口）。
+- `L4 外放`：响应的 `raw_url` / `direct_url` 改写为 `/openlist/...`，外部播放器可达。
+- `L2/L3`：服务端取流不变，`raw_url`/`direct_url` 同样改写为 `/openlist` 供前端兜底/外放。
+
+### 验证
+
+- 回归测试（`handlers_bundled_play_test.go`）：
+  - `TestRewriteBundledURL`：5244 直链 → `/openlist`；外部 OpenList、非 bundled 配置、空串、非法 URL 均不改写。
+  - `TestPlay_BundledNativeMp4_RewrittenToOpenlistProxy`：原生 MP4（L0）`url` 变为 `/openlist/p/local/...mp4?sign=`，无 `127.0.0.1:5244` 泄露。
+  - `TestPlay_BundledMkv_RemuxKeepsBackendURL`：MKV（L2）`url` 仍是 `/api/play/remux?u=http%3A%2F%2F127.0.0.1%3A5244...`（服务端取流），`raw_url`/`direct_url` 改写为 `/openlist`。
+  - `TestPlay_BundledExternalFallback_RewritesRawURL`：缺 ffmpeg（L4）时 `raw_url`/`direct_url` 改写为 `/openlist`，不再指向连不上的后端。
+  - `TestPlay_BundledStrmHttp_RewrittenToOpenlist`：`.strm` 文本指向 5244 时同样改写为 `/openlist`。
+- 真实 Chromium 跑 `play_verify2.js`（容器 `nm2fix` = 新二进制 + 复用 `nm2test` 的库数据）：
+  - **MP4（L0）**：`<video>.src = http://<host>:18097/openlist/p/local/...mp4`，反代返回 **206**（Range 可用），`readyState=4`、**播到结尾（5s）**、无 `127.0.0.1` 泄露。
+  - **MKV（L2）**：`<video>.src = /api/play/remux?u=http%3A%2F%2F127.0.0.1%3A5244...`，remux 返回 **200**，`readyState=4`、无错误。
+  - 结论：**ALL PASS**，浏览器真实播放，MP4/MKV 修复生效。
+
+### 交付物
+
+- 源码：本节修复随本提交推送 `main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
+- 本地验证镜像：`newmovie:2.0-fix`（在 `newmovie:2.0-test` 基础上仅替换后端二进制，已用真实浏览器验证）。
