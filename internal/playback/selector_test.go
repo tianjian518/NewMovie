@@ -55,25 +55,27 @@ func TestL3TranscodeWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestL2RemuxHEVC_MKV_AAC(t *testing.T) {
-	// HEVC + AAC 的 MKV：编码浏览器能解，仅容器不认 → 重封装页内播，不再甩外部。
+func TestHEVC_MKV_NoTranscode_External(t *testing.T) {
+	// HEVC 在 MKV 里、且未开启/不支持转码：重封装成 MP4 浏览器（尤其 Chrome/Firefox）
+	// 依然解不了 HEVC，页内只会一直转圈。正确做法是唤起外部播放器（自带 HEVC 解码），
+	// 或提示用户开启转码。这正是对标 Jellyfin/Emby：HEVC 默认转码，否则外部。
 	d := Select(Input{
 		Container: "mkv", VideoCodec: "hevc", AudioCodec: "aac",
 		RawURL: "https://cdn.example.com/f.mkv", FFmpegAvailable: true,
 	})
-	if d.Level != L2Remux {
-		t.Fatalf("HEVC+MKV(AAC) 应 L2 重封装页内播，得到 %+v", d)
+	if d.Level != L4External {
+		t.Fatalf("HEVC+MKV 无转码应 L4 外部（不再重封装后转圈），得到 %+v", d)
 	}
 }
 
-func TestL2RemuxHEVC_MKV_AC3(t *testing.T) {
-	// 4K 常见组合：HEVC + AC3（杜比数字）。AC3 可 -c copy 进 MP4 → 页内播。
+func TestHEVC_MKV_AC3_NoTranscode_External(t *testing.T) {
+	// HEVC + AC3：同上，视频编码浏览器解不了 → 外部播放器。
 	d := Select(Input{
 		Container: "mkv", VideoCodec: "hevc", AudioCodec: "ac3",
 		RawURL: "https://cdn.example.com/f.mkv", FFmpegAvailable: true,
 	})
-	if d.Level != L2Remux {
-		t.Fatalf("HEVC+MKV(AC3) 应 L2 重封装，得到 %+v", d)
+	if d.Level != L4External {
+		t.Fatalf("HEVC+MKV(AC3) 无转码应 L4 外部，得到 %+v", d)
 	}
 }
 
@@ -115,26 +117,26 @@ func TestL4ExternalWhenTranscodeOff(t *testing.T) {
 	}
 }
 
-func TestL2RemuxHEVC_MKV_DTS(t *testing.T) {
-	// 4K 蓝光原盘典型组合：HEVC 视频 + DTS-HD 音轨。
-	// 视频保留、仅把 DTS 转成 AAC 重封装为 MP4 → 页内可播，不再甩外部播放器。
+func TestHEVC_MKV_DTS_NoTranscode_External(t *testing.T) {
+	// 4K 蓝光原盘典型组合：HEVC 视频 + DTS-HD 音轨。视频编码浏览器解不了 → 外部播放器
+	// （DTS 转 AAC 无济于事，因为视频仍是 HEVC）。开启转码后才会走 L3 把视频也转掉。
 	d := Select(Input{
 		Container: "mkv", VideoCodec: "hevc", AudioCodec: "dts",
 		RawURL: "https://cdn.example.com/f.mkv", FFmpegAvailable: true,
 	})
-	if d.Level != L2Remux || !d.NeedsAudioTranscode {
-		t.Fatalf("HEVC+DTS 应 L2 且 NeedsAudioTranscode，得到 %+v", d)
+	if d.Level != L4External {
+		t.Fatalf("HEVC+DTS 无转码应 L4 外部，得到 %+v", d)
 	}
 }
 
-func TestL2RemuxHEVC_MKV_TrueHD(t *testing.T) {
-	// TrueHD/Atmos 同理：视频拷贝、音轨转 AAC。
+func TestHEVC_MKV_TrueHD_NoTranscode_External(t *testing.T) {
+	// TrueHD/Atmos 同理：视频编码浏览器解不了 → 外部播放器。
 	d := Select(Input{
 		Container: "mkv", VideoCodec: "h265", AudioCodec: "truehd",
 		RawURL: "https://cdn.example.com/f.mkv", FFmpegAvailable: true,
 	})
-	if d.Level != L2Remux || !d.NeedsAudioTranscode {
-		t.Fatalf("HEVC+TrueHD 应 L2 且 NeedsAudioTranscode，得到 %+v", d)
+	if d.Level != L4External {
+		t.Fatalf("HEVC+TrueHD 无转码应 L4 外部，得到 %+v", d)
 	}
 }
 
@@ -151,17 +153,18 @@ func TestL3TranscodeHEVCWhenEnabled(t *testing.T) {
 }
 
 // TestTranscodeUnavailable_HEVCFallsBack 锁住 libx264 缺失时的安全降级：
-// ffmpeg 在、转码开关开，但服务端 ffmpeg 缺 libx264 → 绝不能走 L3（会静默失败空 200），
-// 应降级为 L2 重封装保留 HEVC（HEVC 能力浏览器可播，MKV 场景）或 L4 外部。
+// ffmpeg 在、转码开关开，但服务端 ffmpeg 缺 libx264 → 绝不能走 L3（会静默失败空 200）。
+// HEVC 视频浏览器本就解不了，缺转码时统一唤起外部播放器（MKV/MP4 皆然），
+// 不再重封装出浏览器解不了的 HEVC-MP4 导致页内一直转圈。
 func TestTranscodeUnavailable_HEVCFallsBack(t *testing.T) {
-	// MKV+HEVC：缺 libx264 且转码关 → L2 重封装保留 HEVC（不误走 L3）。
+	// MKV+HEVC：缺 libx264 → 外部播放器（不再 L2 重封装保留 HEVC 后转圈）。
 	d := Select(Input{Container: "mkv", VideoCodec: "hevc", AudioCodec: "aac",
 		RawURL: "https://cdn.example.com/f.mkv", FFmpegAvailable: true, TranscodeAvailable: false})
 	if d.Level == L3Transcode {
 		t.Fatalf("缺 libx264 时 HEVC 不应走 L3 转码，得到 %+v", d)
 	}
-	if d.Level != L2Remux {
-		t.Fatalf("缺 libx264 的 MKV+HEVC 应 L2 重封装保留 HEVC，得到 %+v", d)
+	if d.Level != L4External {
+		t.Fatalf("缺 libx264 的 MKV+HEVC 应 L4 外部，得到 %+v", d)
 	}
 	// MP4+HEVC：原生容器无法靠重封装修解码 → 外部播放器。
 	d2 := Select(Input{Container: "mp4", VideoCodec: "hevc", AudioCodec: "aac",
@@ -174,15 +177,15 @@ func TestTranscodeUnavailable_HEVCFallsBack(t *testing.T) {
 	}
 }
 
-func TestL2RemuxHEVCWhenTranscodeOff(t *testing.T) {
-	// 转码关闭时（ffmpeg 在），HEVC+MKV 仍走 L2 重封装（保留给 HEVC 能力浏览器：
-	// Safari、带扩展的 Chrome），而不是甩外部。
+func TestHEVCWhenTranscodeOff_External(t *testing.T) {
+	// 转码关闭时（ffmpeg 在），HEVC+MKV 不再重封装（浏览器解不了 HEVC 会一直转圈），
+	// 而是唤起外部播放器（自带 HEVC 解码），或提示用户开启转码页内播。
 	d := Select(Input{
 		Container: "mkv", VideoCodec: "hevc", AudioCodec: "aac",
 		RawURL: "https://cdn.example.com/f.mkv", TranscodeEnabled: false, FFmpegAvailable: true,
 	})
-	if d.Level != L2Remux {
-		t.Fatalf("HEVC 未开转码应仍 L2 重封装（保留给 HEVC 浏览器），得到 %+v", d)
+	if d.Level != L4External {
+		t.Fatalf("HEVC 未开转码应 L4 外部（不再重封装后转圈），得到 %+v", d)
 	}
 }
 
@@ -223,5 +226,24 @@ func TestNoFFmpeg_NativeMP4StillDirect(t *testing.T) {
 		RawURL: "https://cdn.example.com/f.mp4"})
 	if d.Level != L0Direct {
 		t.Fatalf("无 ffmpeg 时原生 MP4 仍应 L0 直链，得到 %+v", d)
+	}
+}
+
+// TestUnknownContainer_TriesDirectPlay 锁住「无扩展名 strm 直链」的兜底：
+// 容器未知时不像其它实现那样直接甩外部，而是把直链交给浏览器试播（多数 strm 直链
+// 本就是可直接播放的流）；仅当确实没有任何可用直链时才外部播放器。
+func TestUnknownContainer_TriesDirectPlay(t *testing.T) {
+	d := Select(Input{Container: "", VideoCodec: "", AudioCodec: "",
+		RawURL: "https://cdn.example.com/secret-link?sign=abc", FFmpegAvailable: true})
+	if d.Level != L0Direct {
+		t.Fatalf("容器未知的直链应 L0 交由浏览器试播，得到 %+v", d)
+	}
+}
+
+func TestUnknownContainer_NoURL_External(t *testing.T) {
+	// 容器未知且无任何可用直链 → 外部播放器。
+	d := Select(Input{Container: "", VideoCodec: "", AudioCodec: "", FFmpegAvailable: true})
+	if d.Level != L4External {
+		t.Fatalf("容器未知且无直链应 L4 外部，得到 %+v", d)
 	}
 }

@@ -122,6 +122,20 @@ func Select(in Input) Decision {
 		return Decision{Level: L4External, Label: "外部", Reason: "用户偏好外部播放器", SupportsRange: in.SupportsRange}
 	}
 
+	// 容器未知：多为无扩展名的 strm 直链（签名链 / OpenList /d/ 链接）。不像其它实现那样
+	// 直接甩外部，而是把直链交给浏览器试播——多数 strm 直链本就是可直接播放的流
+	//（如直链 mp4），播不了再由前端报错 / 外部打开兜底。仅当确实没有任何可用直链时才外放。
+	// （有 ffprobe 时容器会被探测出来走下面的正常分支，这里只是「探测不可用」的兜底。）
+	if c == "" {
+		if u := pickURL(in); u != "" {
+			return Decision{Level: L0Direct, Label: "直链",
+				Reason: "容器未知（多为无扩展名 strm 直链），交由浏览器直接试播",
+				URL: u, UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
+		}
+		return Decision{Level: L4External, Label: "外部",
+			Reason: "容器未知且无可用直链，唤起外部播放器", SupportsRange: in.SupportsRange}
+	}
+
 	browserNative := nativeContainers[c] && nativeVideo[vc] && nativeAudio[ac]
 
 	// 浏览器原生支持：零开销直链（有防盗链则代理补 header）。
@@ -184,16 +198,17 @@ func Select(in Input) Decision {
 			URL: "", UseRawURL: in.RawURL != "", NeedsTranscode: true, SupportsRange: in.SupportsRange}
 	}
 
-	// 4) 容器浏览器不认、视频可重封装但解不了（HEVC 在 MKV/TS 里）、且未开转码 → 仍走 L2 重封装：
-	//    保留 HEVC，给带 HEVC 解码器的浏览器（Safari、部分 Chrome）页内播的机会。
-	//    （原生容器里的 HEVC 不会进这里——needFix 为 false——直接落到底部外部播放器。）
+	// 4) 容器浏览器不认、视频编码浏览器也解不了（HEVC/h265 等）、且未开启/不能转码：
+	//    此时「重封装」毫无意义——浏览器依然解不了视频，页内只会一直转圈（Chromium 对
+	//    不认识的编码既不报错也不播放，卡在 loading）。正确做法是交给外部播放器
+	//    （VLC/IINA 等自带 HEVC 解码），或提示用户开启转码（HEVC→H.264 人人可播）。
+	//    这正是对标 Jellyfin/Emby 的处理：HEVC 默认转码，否则落到外部播放器，
+	//    绝不把用户晾在加载中转圈。
+	//    （原生容器里的 HEVC 不会进这里——needFix 为 false——已在第 3 步转码或落到底部外部。）
 	if needFix && remuxVideo[vc] {
-		if remuxAudio[ac] {
-			return Decision{Level: L2Remux, Label: "重封装", Reason: "容器不兼容但编码可用，服务端 -c copy 重封装为 MP4（需浏览器支持 HEVC）",
-				URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange}
-		}
-		return Decision{Level: L2Remux, Label: "重封装", Reason: "视频保留、音轨转 AAC 重封装为 MP4（需浏览器支持 HEVC）",
-			URL: "", UseRawURL: in.RawURL != "", SupportsRange: in.SupportsRange, NeedsAudioTranscode: true}
+		return Decision{Level: L4External, Label: "外部",
+			Reason: "视频编码（如 HEVC/H.265）浏览器无法直接解码，且未开启或不支持转码，已唤起外部播放器（可在「设置」开启「允许视频转码」页内播）",
+			SupportsRange: in.SupportsRange}
 	}
 
 	// 5) 兜底：外部播放器（绝不给用户一句"不支持"）。

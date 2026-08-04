@@ -1418,21 +1418,21 @@ func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 
 // probeFile 用 ffprobe 探测媒体：时长、音轨列表、编码。best-effort，
 // ffprobe 缺失或超时/失败一律返回错误，由调用方标记 probe 跳过，避免每次播放都重试。
-func (s *Server) probeFile(ctx context.Context, rawURL string) (dur int, audio []model.AudioTrack, vc, ac string, err error) {
+func (s *Server) probeFile(ctx context.Context, rawURL string) (dur int, audio []model.AudioTrack, vc, ac, container string, err error) {
 	bin, err := exec.LookPath("ffprobe")
 	if err != nil {
-		return 0, nil, "", "", fmt.Errorf("ffprobe 不可用")
+		return 0, nil, "", "", "", fmt.Errorf("ffprobe 不可用")
 	}
 	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(pctx, bin, "-v", "error",
-		"-show_entries", "stream=index,codec_type,codec_name:stream_tags=language,title:format=duration",
+		"-show_entries", "stream=index,codec_type,codec_name:stream_tags=language,title:format=duration:format=format_name",
 		"-of", "json", rawURL)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err = cmd.Run(); err != nil {
-		return 0, nil, "", "", err
+		return 0, nil, "", "", "", err
 	}
 	var probe struct {
 		Streams []struct {
@@ -1445,14 +1445,21 @@ func (s *Server) probeFile(ctx context.Context, rawURL string) (dur int, audio [
 			} `json:"tags"`
 		} `json:"streams"`
 		Format struct {
-			Duration string `json:"duration"`
+			Duration   string `json:"duration"`
+			FormatName string `json:"format_name"`
 		} `json:"format"`
 	}
 	if err = json.Unmarshal(out.Bytes(), &probe); err != nil {
-		return 0, nil, "", "", err
+		return 0, nil, "", "", "", err
 	}
 	if d, e := strconv.ParseFloat(probe.Format.Duration, 64); e == nil {
 		dur = int(d)
+	}
+	// 容器从 ffprobe 的 format_name 归一（matroska→mkv，quicktime/mov/mp4→mp4 等）。
+	// 这是「探测即真相」的关键：无扩展名的 strm 直链靠这一项认出真实容器，
+	// 才能正确走重封装/转码，而不是因为文件名猜不出就被甩外部播放器。
+	if c := normContainer(probe.Format.FormatName); c != "" {
+		container = c
 	}
 	for _, st := range probe.Streams {
 		switch st.CodecType {
@@ -1470,7 +1477,31 @@ func (s *Server) probeFile(ctx context.Context, rawURL string) (dur int, audio [
 			}
 		}
 	}
-	return dur, audio, vc, ac, nil
+	return dur, audio, vc, ac, container, nil
+}
+
+// normContainer 把 ffprobe 的 format_name（常为逗号分隔列表，如 "matroska,webm"）
+// 归一为 playback 包使用的容器名（mkv/mp4/webm）。未知格式返回空。
+func normContainer(name string) string {
+	for _, part := range strings.Split(name, ",") {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "matroska":
+			return "mkv"
+		case "mov", "mp4", "quicktime", "m4v":
+			return "mp4"
+		case "webm":
+			return "webm"
+		case "mpegts", "ts":
+			return "ts"
+		case "flv":
+			return "flv"
+		case "avi":
+			return "avi"
+		case "asf", "wmv":
+			return "wmv"
+		}
+	}
+	return ""
 }
 
 // normCodec 把 ffprobe 的编码名归一为 playback 包使用的命名（hevc→h265）。
@@ -1516,16 +1547,31 @@ func (s *Server) saveRecord(w http.ResponseWriter, r *http.Request) {
 // playItem 解析单个文件，返回五级降级决策 + 直链。
 // containerExt 从 URL 或本地路径里取容器扩展名（mkv/mp4/m3u8…），忽略查询串。
 // STRM 的容器在扫描时未必能拿到，播放前用来源 URL 补一次。
+// 只从 URL「路径的最后一段」取扩展名——绝不可对整串取最后一个点，否则会把
+// 主机里的点（如 127.0.0.1、example.com）误当扩展名分隔符，导致容器被解析成
+// "1:5244/..." 这类垃圾值（内置 139cas 正是 127.0.0.1:5244，此 bug 会让所有
+// 内置源 strm 的容器推断全错，进而被错误甩去外部播放器）。
 func containerExt(u string) string {
-	if i := strings.LastIndex(u, "."); i >= 0 {
-		ext := u[i+1:]
-		if q := strings.Index(ext, "?"); q >= 0 {
-			ext = ext[:q]
-		}
-		if h := strings.Index(ext, "#"); h >= 0 {
-			ext = ext[:h]
-		}
-		return strings.ToLower(ext)
+	s := u
+	// 先剥掉查询/片段
+	if q := strings.IndexAny(s, "?#"); q >= 0 {
+		s = s[:q]
+	}
+	// 再剥掉 scheme（http:// / file:// 等）
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	// 只取路径最后一段（去掉 host 部分）
+	seg := s
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		seg = s[i+1:]
+	}
+	// 仍残留 ':'（如 host:port）说明不是合法文件名段，无扩展名
+	if strings.Contains(seg, ":") {
+		return ""
+	}
+	if i := strings.LastIndex(seg, "."); i >= 0 {
+		return strings.ToLower(seg[i+1:])
 	}
 	return ""
 }
@@ -1585,19 +1631,20 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	// 取源：原生文件走 GetLink；STRM 先用解析器归一化出真实来源（http / openlist / file）。
 	// 这是 STRM 能在页内播放的关键——此前 playItem 对 strm 与原生文件一视同仁，
 	// 而 http 直链型 strm 的 StorageID 为空，GetStorage("") 直接报错，自然只能甩外部播放器。
-	var rawURL, directURL string
+	var rawURL, directURL, triedPath string
 	headers := map[string]string{}
 
 	if f.Source == model.SrcStrm {
+		// STRM 的本质（对标 Jellyfin/Emby/Plex/Kodi）：.strm 只是一行「指向媒体的文本」，
+		// 播放时读出这行、拿到真实媒体地址，然后走与原生文件完全相同的
+		// 「探测 → 五级降级」管线。所以这里只负责「解析出源」，不做任何播放决策。
+		// 解析失败不再默默甩外部播放器，而是给出明确源后再由统一决策兜底。
 		storages, _ := s.Store.ListStorages()
 		rewrites, _ := s.Store.ListPathRewrites()
 		res := strm.NewResolver(storages, rewrites).Resolve(f.StrmRaw)
 		switch res.Scheme {
 		case "http", "https":
 			rawURL = res.RawURL
-			if f.Container == "" {
-				f.Container = containerExt(res.RawURL)
-			}
 		case "openlist":
 			stID := res.StorageID
 			if stID == "" {
@@ -1627,23 +1674,31 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 			if rawURL == "" && directURL == "" && isStreamableURL(f.StrmRaw) {
 				rawURL = f.StrmRaw
 				triedPath = f.StrmRaw
-				if f.Container == "" {
-					f.Container = containerExt(f.StrmRaw)
-				}
 			}
 			if directURL == "" && st.SignKey != "" {
 				directURL = cl.SignedDURL(triedPath) // 自行算签名，不必让用户关签名
 			}
-			if f.Container == "" {
-				f.Container = containerExt(triedPath)
-			}
 		case "file":
 			rawURL = "file://" + res.Path
-			if f.Container == "" {
-				f.Container = containerExt(res.Path)
-			}
 		default:
 			writeErr(w, http.StatusBadRequest, "无法解析的 STRM 来源："+f.StrmRaw)
+			return
+		}
+		// 容器兜底：解析后仍拿不到容器（多见于无扩展名的签名链 / OpenList /d/ 链接），
+		// 尝试从直链/中转链/解析路径/原始文本的扩展名推断；推断不出也无妨——后面的
+		// 「探测」会从媒体内容里识别容器，再不行就交给浏览器直接试播，绝不因为文件名
+		// 猜不出就甩外部播放器（这正是此前 Strm 总被甩外部的根因）。
+		if f.Container == "" {
+			for _, cand := range []string{rawURL, directURL, triedPath, f.StrmRaw} {
+				if c := containerExt(cand); c != "" {
+					f.Container = c
+					break
+				}
+			}
+		}
+		// 解析彻底失败（既无直链也无中转链）：明确报错，而不是让后面走到「拿不到源地址」的 502。
+		if rawURL == "" && directURL == "" {
+			writeErr(w, http.StatusBadGateway, "无法获取 STRM 播放源："+f.StrmRaw)
 			return
 		}
 	} else {
@@ -1664,21 +1719,37 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		}
 	}
 
-	// 懒探测：首次播放时 ffprobe 一次，补全音轨列表/时长/编码并缓存进文件，
-	// 供播放器做音轨切换与更准的降级决策。失败（ffprobe 缺失/超时）标记 skipped 不再重试。
-	if f.ProbeState == "pending" && rawURL != "" {
-		if dur, atracks, pvc, pac, perr := s.probeFile(r.Context(), rawURL); perr == nil {
-			f.DurationSec = dur
-			f.AudioTracks = atracks
-			if pvc != "" {
-				f.VideoCodec = pvc
+	// 懒探测：首次播放时 ffprobe 一次，补全容器/音轨列表/时长/编码并缓存进文件，
+	// 供播放器做音轨切换与更准的降级决策。失败（ffprobe 缺失/超时/源不可达）标记 skipped 不再重试。
+	// 探测源优先用 raw_url，没有再用 direct_url（OpenList /d/ 中转链同样可被 ffprobe 探测）。
+	// 这一步是 strm 能正确页内播的关键：无扩展名的 strm 直链靠「探测」从媒体内容里认出
+	// 容器/编码，而不是靠猜文件名——猜不出就只会被甩去外部播放器。
+	if f.ProbeState == "pending" {
+		probeSrc := rawURL
+		if probeSrc == "" {
+			probeSrc = directURL
+		}
+		if probeSrc != "" {
+			if dur, atracks, pvc, pac, pcont, perr := s.probeFile(r.Context(), probeSrc); perr == nil {
+				f.DurationSec = dur
+				f.AudioTracks = atracks
+				if pvc != "" {
+					f.VideoCodec = pvc
+				}
+				if pac != "" {
+					f.AudioCodec = pac
+				}
+				if pcont != "" {
+					f.Container = pcont
+				}
+				f.ProbeState = "done"
+				_ = s.Store.SaveMediaFile(f)
+			} else {
+				f.ProbeState = "skipped"
+				_ = s.Store.SaveMediaFile(f)
 			}
-			if pac != "" {
-				f.AudioCodec = pac
-			}
-			f.ProbeState = "done"
-			_ = s.Store.SaveMediaFile(f)
 		} else {
+			// 没有任何可用源可探测：标记 skipped，后面交给浏览器直接试播或外部播放器兜底。
 			f.ProbeState = "skipped"
 			_ = s.Store.SaveMediaFile(f)
 		}

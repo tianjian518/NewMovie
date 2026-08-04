@@ -38,14 +38,18 @@ func TestPlay_StrmHttpResolvesInPage(t *testing.T) {
 }
 
 // TestPlay_StrmHttpHEVC_TranscodeWhenEnabled 锁定视频转码：HEVC 的 strm 在开启
-// 「允许视频转码」后应走 L3（HEVC→H.264），任何浏览器都能页内播，不再报「视频不存在」。
+// 「允许视频转码」后——
+//   - 若服务端 ffmpeg 带 libx264（生产镜像），走 L3 转码（HEVC→H.264），任何浏览器页内播；
+//   - 若缺 libx264（精简镜像），不再「重封装出浏览器解不了的 HEVC-MP4 导致一直转圈」，
+//     而是干净地唤起外部播放器（L4）。
+// 两种情况都绝不再产生「页内转圈」的不可用状态。
 func TestPlay_StrmHttpHEVC_TranscodeWhenEnabled(t *testing.T) {
 	st, do := featureFixture(t)
 	_ = st.SaveSetting("transcode_enabled", "1")
 	_ = st.SaveMediaFile(model.MediaFile{
 		ID: "fhevc", ItemID: "m1", Source: model.SrcStrm,
 		StrmRaw: "https://cdn.example.com/movie-hevc.mkv",
-		VideoCodec: "hevc", AudioCodec: "aac",
+		VideoCodec: "hevc", AudioCodec: "aac", ProbeState: "done",
 	})
 	code, body := do(http.MethodGet, "/api/items/fhevc/play", "")
 	if code != http.StatusOK {
@@ -58,14 +62,49 @@ func TestPlay_StrmHttpHEVC_TranscodeWhenEnabled(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &d); err != nil {
 		t.Fatalf("解析: %v (%s)", err, body)
 	}
-	if d.Level != 3 && d.Level != 2 {
-		t.Fatalf("HEVC+转码应页内播放（L3 转码或 L2 重封装保留 HEVC），得到 level=%d (%s)", d.Level, body)
+	// 关键：绝不再走 L2 重封装（那会产出浏览器解不了的 HEVC-MP4，页内一直转圈）。
+	if d.Level == 2 {
+		t.Fatalf("HEVC 绝不应走 L2 重封装（会转圈），得到 level=2 (%s)", body)
 	}
-	if d.Level == 3 && !strings.Contains(d.URL, "/api/play/transcode?u=") {
-		t.Fatalf("HEVC 转码 URL 应指向 transcode 端点，得到 %q", d.URL)
+	if ffmpegHasEncoder("ffmpeg", "libx264") {
+		if d.Level != 3 {
+			t.Fatalf("有 libx264 时 HEVC+转码应 L3 转码，得到 level=%d (%s)", d.Level, body)
+		}
+		if !strings.Contains(d.URL, "/api/play/transcode?u=") {
+			t.Fatalf("HEVC 转码 URL 应指向 transcode 端点，得到 %q", d.URL)
+		}
+	} else {
+		if d.Level != 4 {
+			t.Fatalf("无 libx264 时 HEVC 应 L4 外部（不再转圈），得到 level=%d (%s)", d.Level, body)
+		}
 	}
-	if d.Level == 2 && !strings.Contains(d.URL, "/api/play/remux?u=") {
-		t.Fatalf("HEVC 重封装 URL 应指向 remux 端点，得到 %q", d.URL)
+}
+
+// TestPlay_StrmHttpHEVC_NoTranscode_External 锁定：HEVC 但未开启/不支持转码时，
+// 唤起外部播放器（明确原因），而不是重封装后在页内一直转圈。
+func TestPlay_StrmHttpHEVC_NoTranscode_External(t *testing.T) {
+	st, do := featureFixture(t)
+	_ = st.SaveMediaFile(model.MediaFile{
+		ID: "fhevc2", ItemID: "m1", Source: model.SrcStrm,
+		StrmRaw: "https://cdn.example.com/movie-hevc.mkv",
+		VideoCodec: "hevc", AudioCodec: "aac", ProbeState: "done",
+	})
+	code, body := do(http.MethodGet, "/api/items/fhevc2/play", "")
+	if code != http.StatusOK {
+		t.Fatalf("play 期望 200，得到 %d (%s)", code, body)
+	}
+	var d struct {
+		Level  int    `json:"level"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatalf("解析: %v (%s)", err, body)
+	}
+	if d.Level != 4 {
+		t.Fatalf("HEVC 未开转码应 L4 外部，得到 level=%d (%s)", d.Level, body)
+	}
+	if !strings.Contains(d.Reason, "外部") {
+		t.Fatalf("HEVC 外部原因应说明唤起外部播放器，得到 %q", d.Reason)
 	}
 }
 
