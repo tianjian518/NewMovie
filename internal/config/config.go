@@ -17,6 +17,9 @@ type Config struct {
 	AdminPass    string
 	TMDBKey      string
 	TMDBBase     string // TMDB API 根地址覆盖（自建反代/镜像），空则用官方 + 内置备用域名
+	TMDBImageBase string // TMDB 图片 CDN 根地址覆盖（镜像）。空则用官方 image.tmdb.org。
+	                    // 部分网络 image.tmdb.org 被墙，可用自建图片反代/镜像，或由本服务
+	                	// /api/image 服务端取图（浏览器只跟 8096 入口，无需直连 CDN）。
 	ProxyRefresh bool   // 默认 refresh=false 复用 OpenList 缓存
 	DefaultRate  float64
 	// TranscodeEnabled 是否允许视频转码（HEVC→H264 等）。默认关：转码是 CPU 黑洞。
@@ -57,6 +60,7 @@ func Load() *Config {
 		AdminPass:    getenv("VIDRIVE_ADMIN_PASS", "admin"),
 		TMDBKey:      os.Getenv("TMDB_API_KEY"),
 		TMDBBase:     os.Getenv("TMDB_API_BASE"),
+		TMDBImageBase: os.Getenv("TMDB_IMAGE_BASE"),
 		ProxyRefresh: false,
 		DefaultRate:  2.0, // 保守限速，风控友好
 	}

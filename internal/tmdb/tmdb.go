@@ -382,11 +382,67 @@ func toMeta(x resultItem) Meta {
 }
 
 // ImageURL 拼接 TMDB 图片完整地址。size 形如 "w500"/"w1280"/"original"。
+//
+// 图片 CDN 默认 image.tmdb.org，但部分网络（如墙内）直连被墙，浏览器 <img> 直接
+// 加载会整片空白。故支持两层覆盖：
+//  1. imageBase：CDN 根地址可换镜像（TMDB_IMAGE_BASE 环境变量）。
+//  2. imageProxyPrefix：若由上层（api 包）设置为本服务的图片代理端点
+//     （如 "/api/image?u="），则返回「代理地址 + 编码后的真实图链」，浏览器只跟
+//     本服务入口，由服务端去取图并缓存——与 2.0「单端口」模型一致。
+// 缺省（两者皆空）行为与旧版一致：返回 image.tmdb.org 直链。
+var (
+	imageBase        = "https://image.tmdb.org/t/p" // 不含末尾斜杠
+	imageProxyPrefix = ""                           // 空表示返回直链
+)
+
+// SetImageBase 覆盖图片 CDN 根（含 /t/p 之前的部分），如 "https://mirror.example/t/p"。
+// 传空串恢复默认 image.tmdb.org。
+func SetImageBase(base string) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		imageBase = "https://image.tmdb.org/t/p"
+		return
+	}
+	imageBase = strings.TrimRight(base, "/")
+}
+
+// SetImageProxyPrefix 设置图片代理前缀（由 api 包在启动时调用）。
+// 设非空（如 "/api/image?u="）后，ImageURL 返回经本服务代理的地址；设空恢复直链。
+func SetImageProxyPrefix(prefix string) {
+	imageProxyPrefix = strings.TrimSpace(prefix)
+}
+
+// ImageBaseHost 返回当前图片 CDN 的主机名（供 api 包做 SSRF 白名单）。
+// 用 Hostname() 去掉端口，便于与请求里的 u.Hostname() 比较。
+func ImageBaseHost() string {
+	if u, err := url.Parse(imageBase); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return "image.tmdb.org"
+}
+
+// ImageHosts 返回允许经 /api/image 代理的图片主机白名单（官方 + 当前镜像）。
+func ImageHosts() []string {
+	hosts := map[string]bool{"image.tmdb.org": true}
+	if h := ImageBaseHost(); h != "" {
+		hosts[h] = true
+	}
+	out := make([]string, 0, len(hosts))
+	for h := range hosts {
+		out = append(out, h)
+	}
+	return out
+}
+
 func ImageURL(path, size string) string {
 	if path == "" {
 		return ""
 	}
-	return "https://image.tmdb.org/t/p/" + size + path
+	full := imageBase + "/" + size + path
+	if imageProxyPrefix == "" {
+		return full
+	}
+	return imageProxyPrefix + url.QueryEscape(full)
 }
 
 func firstNonEmpty(vs ...string) string {

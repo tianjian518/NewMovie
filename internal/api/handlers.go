@@ -5,9 +5,11 @@ package api
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -114,6 +116,13 @@ func New(st store.Store, cfg *config.Config) *Server {
 		s.ffmpegOK = false
 		log.Printf("[warn] 未找到 ffmpeg：重封装/转码不可用，MKV/HEVC 将只能唤起外部播放器。" +
 			"请用含 ffmpeg 的镜像（tianjian518/newmovie:latest 已含 ffmpeg）")
+	}
+
+	// 图片代理：把 TMDB 图片直链改写成经本服务 /api/image 的地址，浏览器只跟 8096 入口，
+	// 由服务端去取图并缓存。解决「image.tmdb.org 被墙 → 海报全白」的问题（与 2.0 单端口模型一致）。
+	tmdb.SetImageProxyPrefix("/api/image?u=")
+	if s.Cfg.TMDBImageBase != "" {
+		tmdb.SetImageBase(s.Cfg.TMDBImageBase)
 	}
 	return s
 }
@@ -293,6 +302,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	case p == "api/login" && r.Method == http.MethodPost:
 		s.login(w, r)
+		return
+	}
+	// /api/image 是海报/背景图代理：浏览器 <img> 无法携带 Authorization，故公开。
+	// 仅放行 TMDB 图片 CDN 白名单主机（见 handleImageProxy），不构成 SSRF 跳板。
+	if len(parts) >= 2 && parts[0] == "api" && parts[1] == "image" && r.Method == http.MethodGet {
+		s.handleImageProxy(w, r)
 		return
 	}
 
@@ -1898,6 +1913,73 @@ func (s *Server) serveItemImage(w http.ResponseWriter, r *http.Request, id, kind
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "读取失败: "+err.Error())
+		return
+	}
+	writeImageCache(cachePath, b, ct)
+	serveImageBytes(w, r, b, ct)
+}
+
+// handleImageProxy 海报/背景图代理：把 TMDB 图片 CDN 的图经本服务取回并缓存。
+//
+// 为什么需要它：2.0 浏览器只跟 8096 入口，而 TMDB 图片写死 image.tmdb.org，
+// 在部分网络（墙内）直连被墙 → 海报整片空白。经本服务代理后，浏览器只请求
+// /api/image?u=<编码后的图链>，由服务端去取图（服务端连通性通常更好，也可用
+// TMDB_IMAGE_BASE 镜像），彻底解决「刮削有标题、海报全白」。
+//
+// 安全：仅放行 TMDB 图片 CDN 白名单主机（官方 image.tmdb.org + 用户配置的镜像），
+// 不接收任意主机，避免被当成内网 SSRF 跳板。<img> 无法带 Authorization，故本端点公开。
+func (s *Server) handleImageProxy(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("u")
+	if raw == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 u 参数")
+		return
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		writeErr(w, http.StatusBadRequest, "u 不是合法的 http(s) 图片地址")
+		return
+	}
+	// SSRF 白名单：只允许 TMDB 图片 CDN 主机（官方 + 镜像），其余一律拒绝。
+	allowed := false
+	for _, h := range tmdb.ImageHosts() {
+		if strings.EqualFold(u.Hostname(), h) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		writeErr(w, http.StatusForbidden, "仅允许代理 TMDB 图片 CDN（image.tmdb.org 及其镜像）")
+		return
+	}
+
+	// 缓存键：用完整图链做哈希，避免不同图互相串。
+	sum := sha256.Sum256([]byte(u.String()))
+	cachePath := filepath.Join(s.Cfg.CacheDir, "images", "tmdb_"+hex.EncodeToString(sum[:]))
+
+	if b, ct, ok := readImageCache(cachePath); ok {
+		serveImageBytes(w, r, b, ct)
+		return
+	}
+
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+	req.Header.Set("User-Agent", "NewMovie/2.0 (+image-proxy)")
+	resp, err := imageClient.Do(req)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "取图失败: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeErr(w, http.StatusBadGateway, fmt.Sprintf("图片源返回 %d", resp.StatusCode))
+		return
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/jpeg"
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "读取图片失败: "+err.Error())
 		return
 	}
 	writeImageCache(cachePath, b, ct)

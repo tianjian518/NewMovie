@@ -262,3 +262,46 @@ remux/transcode 的 `u=` 参数仍保留真实 5244 地址（服务端取流用�
 
 - 源码：本节修复随本提交推送 `main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
 - 本地验证镜像：`newmovie:2.0-fix`（在 `newmovie:2.0-test` 基础上仅替换后端二进制，已用真实浏览器验证）。
+
+## 九、海报（封面图）修复（刮削有标题、海报全白）
+
+用户反馈「所有电影刮削出来之后，没有封面图」。根因定位：
+
+TMDB 的**元数据 API** 有内置备用域名（`api.themoviedb.org` → 失败自动降级 `api.tmdb.org`），
+所以片名/年份能正常刮削；但**图片 CDN 被硬编码成 `image.tmdb.org`，既无备用域名也无代理**。
+在 `image.tmdb.org` 直连被墙的网络里（很常见），浏览器 `<img>` 直接加载该 CDN 会整片失败，
+于是「有标题、没海报」。这与第八节的播放问题同源：2.0 的浏览器只应跟 8096 入口，
+不应直连第三方 CDN。
+
+### 修复
+
+新增服务端图片代理 `/api/image`（与播放代理同源思路）：
+
+- `tmdb` 包 `ImageURL` 支持两层覆盖：可换图片 CDN 基址（`TMDB_IMAGE_BASE` 镜像），
+  并可在上层设置代理前缀——`api` 包在启动时把前缀固定为 `/api/image?u=`，于是所有
+  `poster_url` / `backdrop_url` 自动变成「经本服务代理」的地址（`/api/image?u=<编码后的图链>`）。
+- `handleImageProxy`：浏览器 `<img>` 只请求 8096 入口，由服务端去取图（服务端连通性通常更好，
+  也可经 `TMDB_IMAGE_BASE` 镜像），落磁盘缓存后回写。支持 Range、浏览器零配置。
+- **安全**：`/api/image` 公开（`<img>` 无法带 Authorization），但仅放行 TMDB 图片 CDN 白名单
+  主机（官方 `image.tmdb.org` + 用户配置的镜像），内网/回环/元数据地址一律 403，
+  不会被当成 SSRF 内网跳板。
+
+效果：海报图链不再依赖浏览器直连 `image.tmdb.org`；只要 NewMovie 服务端能取到图
+（或配置了 `TMDB_IMAGE_BASE` 镜像），海报即可正常显示，无需用户额外改动。
+
+### 验证
+
+- 回归测试：
+  - `internal/tmdb/tmdb_imageurl_test.go`：`ImageURL` 缺省返回 `image.tmdb.org` 直链；
+    设代理前缀后返回 `/api/image?u=<编码图链>`；镜像基址生效且 `ImageHosts()` 含镜像与官方主机。
+  - `internal/api/handlers_image_test.go`：`/api/image` 对 TMDB 图片返回 200 并落盘缓存
+    （换实例读同一 CacheDir 仍命中）；内网/回环/元数据地址（127.0.0.1、169.254.169.254、
+    192.168.x、localhost）一律 403；配置的镜像主机放行。
+- 真实 Chromium 跑 `play_verify_poster.js`（容器 `nm2img` = 新二进制 + `TMDB_IMAGE_BASE`
+  指向本地 mock 图服务，库内某条目 `poster_url` 设为 `/api/image?u=<mock>`）：
+  海报 `<img>` 经代理渲染成功（`naturalWidth=300`、`complete=true`），**无失败请求**。
+
+### 交付物
+
+- 源码：本节修复随本提交推送 `main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
+- 本地验证镜像：`newmovie:2.0-fix`（仅替换后端二进制，已用真实浏览器验证海报渲染）。
