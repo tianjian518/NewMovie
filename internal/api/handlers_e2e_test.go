@@ -108,6 +108,8 @@ func TestE2E_ConnectLibraryPlay_RealFFmpeg(t *testing.T) {
 	_ = st.SaveUser(model.User{ID: "u1", Username: "admin", Password: auth.HashPassword("admin"), IsAdmin: true})
 	_ = st.UpsertToken("u1", "tok")
 	cfg := &config.Config{DataDir: t.TempDir(), CacheDir: t.TempDir() + "/cache"}
+	// 关掉 HLS 以锁定 remux URL 旧断言（HLS 交付单独测）。
+	t.Setenv("VIDRIVE_HLS", "0")
 	ts := httptest.NewServer(New(st, cfg).Handler())
 	defer ts.Close()
 

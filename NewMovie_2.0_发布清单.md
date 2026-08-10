@@ -371,3 +371,103 @@ TMDB 的**元数据 API** 有内置备用域名（`api.themoviedb.org` → 失�
 
 - 源码：`a350988` 已推送 `ghmirror/main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
 - E2E 脚本：`play_verify_strm.js`（保留为持续验证资产，判定 `PASS_STRM`）。
+
+## 十一、客户端能力协商 + HLS 流式（借鉴 Lunarr，根治 HEVC 转圈 + 多浏览器兼容）
+
+按用户要求「借鉴 [Lunarr](https://github.com/lunarr-app/lunarr-go)，能抄的都抄、越全面越好」。
+Lunarr 实际是 **TypeScript / SvelteKit 全栈**（仓库名 `-go` 有误导性、已无 Go 代码），**代码无法逐行复制**，
+但其「能力协商 + 请求驱动 HLS」的架构、算法与 ffmpeg 配方可直接移植。本轮一次性落地两件事：
+
+1. **客户端能力协商**（前端 `canPlayType` 探测 HEVC/AV1/VP9 → 随播放请求上报 → 后端据此决策）；
+2. **HLS 流式**（请求驱动的 ffmpeg 分片生成，`-c copy` 重封装秒播 / `libx264` 转码人人可播）。
+
+> 背景：第十节已修掉「HEVC-in-MKV 被 remux 成 HEVC-MP4 导致 Chrome/Firefox 无限转圈」。
+> 但当时后端**硬编码假设「通用浏览器」**——Safari **原生支持 HEVC**、部分 Chrome **硬件解码 AV1**，
+> 照样被白白转码；且整文件 MP4 重封装在拖拽/Range 上不如 HLS 标准。Lunarr（与 Plex/Jellyfin 一致）
+> 的解法是「**能解就直链、不能解但 H.264+AAC 就 HLS 重封装、真解不了就 HLS 转码成 H.264**」。
+
+### 修复 A：客户端能力协商（前端探测 → 后端决策）
+
+**`web/src/api.ts`**
+
+- 新增 `clientCaps()`：用 `document.createElement("video").canPlayType(...)` 探测
+  `hvc1.1.6.L93.B0` / `hev1.1.6.L93.B0`（HEVC）、`av01.0.08M.08`（AV1）、`vp9`（WebM/MP4），
+  **结果缓存一次**（无需每次播放都探测）。
+- `play` 在 `/api/items/:id/play` 上追加 `?hevc=&av1=&vp9=`（1/0）三个能力参数。
+
+**`internal/playback/selector.go`**
+
+- `Input` 新增 `ClientHEVC / ClientAV1 / ClientVP9 bool`；
+- 新增 `clientDecodable(vc string, in Input) bool`：**取代原来的硬编码 `nativeVideo[vc]` 假设**，
+  综合 ffprobe 探出的视频编码 + 浏览器上报的解码能力来判「浏览器原生可解」。
+- `browserNative` 与 `decodable` 两处均改用 `clientDecodable`。
+
+**`internal/api/handlers.go`**
+
+- `playItem` 新增 `capFlag(r, key, def)` 解析查询参数，填 `playback.Input{ClientHEVC, ClientAV1, ClientVP9}`。
+
+收益：Safari 的 HEVC-in-MP4 现在直链（不再被强制转码）；AV1 硬件解码的 Chrome 同理直链；省 CPU、起播更快。
+
+### 修复 B：HLS 流式（请求驱动分片）
+
+新增独立包 **`internal/hls`**（不污染现有 remux/transcode 的 pipe 模型）：
+
+| 组件 | 说明 |
+|---|---|
+| `Manager` | 会话管理：按 `KeyFor(raw, mode, atrack) = sha256(raw\|mode\|atrack)` 去重；`Acquire` 幂等（重复播放某文件不会起多个 ffmpeg）；`TTL` 过期清理 + `maxSessions` 并发上限淘汰（优先淘汰已完成会话，保活正在看的）；`StartCleanup` 后台周期清理。 |
+| `Session` | 单个生成会话：**单 ffmpeg 进程把整源切片写到磁盘缓存目录**（而非「每分片独立进程」），与现有 pipe 模型一致。分片作为文件天然支持 `Range` 与精准拖动（分片边界即 GOP，独立可解）。 |
+| `BuildArgs` | 移植自 Lunarr `ffmpegHlsArgs`：`-f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type event -hls_flags independent_segments+temp_file -hls_segment_filename seg_%05d.ts index.m3u8`。<br>• `remux`：`-c copy`（仅换容器为 TS，零重编码、MKV→HLS 秒播）；音频不兼容浏览器（DTS/TrueHD/Atmos）时 `-c:v copy -c:a aac -b:a 320k`。<br>• `transcode`：`-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -c:a aac -b:a 192k`，并 `-force_key_frames expr:gte(t,n_forced*6)` 让 GOP 与分片对齐。<br>• `atrack>=0` 时 `-map 0:v:0 -map 0:a:N` 仅抽取该音轨（多音轨 MKV 选语言）。 |
+| `RewritePlaylist` | 把索引里的分片相对路径 `seg_NNNNN.ts` 改写为经本服务分片端点的绝对 URL `/api/play/hls/seg/seg_NNNNN.ts?key=<key>[&token=<token>]`，并注入鉴权 token。 |
+
+**关键实现点（含一个真实生产 bug 的修复）：**
+
+- `Session.run` 必须设 `cmd.Dir = s.dir`：ffmpeg 的分片（`index.m3u8` / `seg_*.ts`）用**相对路径**写出，
+  若不切到会话缓存目录，会落到进程 cwd（即服务运行目录），导致 `WaitPlaylist` 永远找不到分片。
+  本会话已就此补集成测试（`TestManagerGenerate` 真实跑一次 ffmpeg 验证）。**这是上线必现的 bug，已修复。**
+- `handleHLS`（`handlers.go`）采用 **`?key=` 路由**：
+  - 播放列表：`/api/play/hls/index.m3u8?u=<src>&mode=<remux|transcode>[&aac=1][&atrack=N]&token=<t>`；
+  - 分片：`/api/play/hls/seg/<name>?key=<key>&token=<t>`。
+  - `key` 由 `源+模式+音轨` 稳定哈希，`RewritePlaylist` 把分片请求 embed 上解析出的 `key`。
+    **音轨切换（不同 `atrack` → 不同 key）也不会错位**——分片 URL 来自服务端重写的索引，而非前端拼路径。
+- 鉴权沿用 `appendToken` 思路：浏览器 `<video>`/hls.js 拉分片带不上 `Authorization` 头，
+  故播放列表与分片 URL 一律追加 `?token=`，与现有 remux/transcode 一致。
+- `openPlaySource` 抽出 `openPlaySourceCtx(ctx, raw)`：HLS 后台 ffmpeg 经 `context.Background()` 持有源流，
+  不受 HTTP 请求返回而中断（SSRF 守卫不变）。
+- 开关：`VIDRIVE_HLS`（值 `0`/`off`/`false` 禁用）。禁用时 L2/L3 回落到原 remux/transcode URL。
+- 缓存目录：`VIDRIVE_HLS_DIR` / `NEWMOVIE_HLS_DIR`，缺省 `os.TempDir()/newmovie-hls`。
+
+**`internal/api/handlers.go` 在 `playItem` 的 L2/L3 分支新增 HLS 发射：**
+
+```go
+if s.hlsEnabled {
+    mode := "remux"; if dec.Level == playback.L3Transcode { mode = "transcode" }
+    u := "/api/play/hls/" + hls.PlaylistName + "?u=" + url.QueryEscape(src) + "&mode=" + mode
+    if dec.NeedsAudioTranscode { u += "&aac=1" }
+    dec.URL = appendToken(u, getToken(r))
+    dec.SupportsRange = true
+} else {
+    /* 原有 remux/transcode URL，SupportsRange=false */
+}
+```
+
+**前端 `web/src/pages/Player.tsx`**
+
+- 新增 `isHlsUrl(u)`（先按 `?` 截断再判 `path.endsWith(".m3u8")`，因为 HLS URL 带查询参数）；
+- `type: isHlsUrl(dec.url) ? "m3u8" : "auto"`，走已有 hls.js（已为依赖 `hls.js@^1.5.13`）；
+- 多音轨切换在 HLS 下重新启用：`canSwitchAud = dec.level === 2 && auds.length > 1`
+  （`atrack` 已通过 `?atrack=` 透传到 HLS 会话，选语言正确落到新会话）。
+
+### 验证
+
+- **单元测试**
+  - `internal/hls/hls_test.go`：`TestBuildArgsRemuxCopy` / `TestBuildArgsRemuxAAC` / `TestBuildArgsTranscode`（ffmpeg 参数配方断言）、`TestKeyForDeterministic`（`sha256` key 幂等且按模式区分）、`TestRewritePlaylist`（分片路径改写为带 `key`/`token` 端点、注释行不被改写、空 token 原样返回）。
+  - `internal/api/handlers_hls_test.go`：`TestHLS_RemuxPipeline`（全 HTTP 链路：造 h264+aac 的 MKV → 注册存储 → `GET /api/play/hls/index.m3u8?u=…&mode=remux&token=tok` 断言 body 含 `seg_00000.ts?key=<key>` 与 `&token=tok` → `GET /api/play/hls/seg/seg_00000.ts?key=<key>&token=tok` 断言 200 + `video/mp2t` + `Accept-Ranges:bytes` + 非空；未带 token 的分片请求 → 401）、`TestPlay_HLS_DeliversHlsURL`（默认 HLS 开启，http strm → L2 → `url` 含 `/api/play/hls/` 与 `mode=remux` 与 `token=`）。
+- **真实 ffmpeg 集成** `internal/hls/hls_test.go:TestManagerGenerate`：造 13s 的 MKV（`-c:v mpeg2video -c:a aac -f matroska`，TS 兼容、沙箱无需 libx264）→ `Acquire("file://"+src,"remux",false,-1,open)` → 等索引 + `seg_00000.ts`/`seg_00001.ts` → 断言非空。0.31s 真实跑通全链路。**注意**：沙箱 ffmpeg 是 `--disable-libx264` 构建，`transcode` 模式（libx264）在此**无法实跑**，但 `BuildArgs` 已按 Lunarr 配方完整构造、参数断言通过；真实部署镜像（`tianjian518/newmovie:latest`）含 libx264，transcode 链路与 remux 同源（仅 ffmpeg 参数不同），已在配方层验证。
+- **选择器回归隔离**：原有断言 `/api/play/remux?u=` 的 selector 测试（features/bundled/e2e/videoauth/strm）已加 `t.Setenv("VIDRIVE_HLS","0")` 隔离，HLS 由专属测试覆盖，互不干扰。
+- **全量**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿；`web/src` 经 `tsc --noEmit` 校验通过。
+
+### 交付物
+
+- 源码：本节随本提交推送 `main`（触发 GitHub Actions 重建多架构镜像，推 `ghcr.io` + Docker Hub `:2.0` / `:latest`）。
+- 新增包/文件：`internal/hls/hls.go`、`internal/hls/hls_test.go`、`internal/api/handlers_hls_test.go`；改动 `internal/api/handlers.go`、`internal/playback/selector.go`、`web/src/api.ts`、`web/src/pages/Player.tsx`。
+- 借鉴分析：`Lunarr_借鉴分析.md` 已同步更新（能力协商、HLS 流式两项由「待办/建议」移至「已落地」）。

@@ -39,6 +39,13 @@ type Input struct {
 	// 而不是返回一个 500 报错让用户对着「视频不存在」发懵。
 	FFmpegAvailable bool
 	PreferExternal   bool // 用户偏好外部播放器
+
+	// 客户端解码能力（由前端 canPlayType 探测后随播放请求上报，参考 Lunarr 能力协商）。
+	// 用于「直链/重封装」判定：HEVC 在 Safari、AV1 在支持的浏览器上本就能原生解码，
+	// 不必转码。未上报（旧前端 / 直接调 API）时按旧行为：h264/vp9/av1 视为可解、hevc 不可解。
+	ClientHEVC bool
+	ClientAV1  bool
+	ClientVP9  bool
 }
 
 // Decision 决策结果（前端据此显示小标签）。
@@ -102,6 +109,26 @@ var (
 
 func norm(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
+// clientDecodable 判断视频编码在当前客户端是否可解码（参考 Lunarr 客户端能力协商）。
+// 基准（未上报能力）沿用旧行为：h264/avc 始终可解；vp9/av1 默认可解（旧 nativeVideo
+// 即如此假设）；hevc/h265 默认不可解（旧实现从不把 HEVC 当原生）。上报后按真实能力：
+//   hevc 需 ClientHEVC（如 Safari 原生支持）、av1 需 ClientAV1、vp9 需 ClientVP9。
+// 这样 Safari 的 HEVC-in-MP4 可直链、AV1 设备可直链，省去无谓转码；而 Chrome 无 HEVC
+// 解码时仍会正常走到转码/外部，不会把用户晾在解不了的 HEVC-MP4 上。
+func clientDecodable(vc string, in Input) bool {
+	switch norm(vc) {
+	case "h264", "avc":
+		return true
+	case "hevc", "h265":
+		return in.ClientHEVC
+	case "av1":
+		return in.ClientAV1
+	case "vp9":
+		return in.ClientVP9
+	}
+	return false
+}
+
 // Select 选择播放策略。
 //
 // 核心原则（也回应了 v1.1.13 把 mp4 误送重封装导致 HEVC-in-MP4 报错的回归）：
@@ -135,7 +162,7 @@ func Select(in Input) Decision {
 			Reason: "容器未知且无可用直链，唤起外部播放器", SupportsRange: in.SupportsRange}
 	}
 
-	browserNative := nativeContainers[c] && nativeVideo[vc] && nativeAudio[ac]
+	browserNative := nativeContainers[c] && clientDecodable(vc, in) && nativeAudio[ac]
 
 	// 浏览器原生支持：零开销直链（有防盗链则代理补 header）。
 	if browserNative {
@@ -161,10 +188,10 @@ func Select(in Input) Decision {
 			SupportsRange: in.SupportsRange}
 	}
 
-	nativeC := nativeContainers[c]       // mp4/mov/webm：浏览器认容器
-	needFix := containerNeedsRemux[c]    // mkv/ts/m2ts/flv：浏览器不认，必须重封装
-	decodable := nativeVideo[vc]         // h264/vp9/av1：浏览器能解视频
-	audioOK := nativeAudio[ac]           // aac/mp3/opus：浏览器原生音轨
+	nativeC := nativeContainers[c]             // mp4/mov/webm：浏览器认容器
+	needFix := containerNeedsRemux[c]        // mkv/ts/m2ts/flv：浏览器不认，必须重封装
+	decodable := clientDecodable(vc, in)     // 视频编码当前客户端能否解码（含 HEVC/AV1 能力协商）
+	audioOK := nativeAudio[ac]               // aac/mp3/opus：浏览器原生音轨
 
 	// 1) 容器浏览器不认、但视频它能解（h264/vp9/av1 在 MKV/TS 里）→ L2 重封装：
 	//    换容器即可页内播；音轨按需转 AAC（DTS/TrueHD 等装不进 MP4 的情况）。
@@ -203,8 +230,8 @@ func Select(in Input) Decision {
 	//    （VLC/IINA 等自带 HEVC 解码），或提示用户开启转码（HEVC→H.264 人人可播）。
 	//    这正是对标 Jellyfin/Emby 的处理：HEVC 默认转码，否则落到外部播放器，
 	//    绝不把用户晾在加载中转圈。
-	//    （原生容器里的 HEVC 不会进这里——needFix 为 false——已在第 3 步转码或落到底部外部。）
-	if needFix && remuxVideo[vc] {
+	//    （能解的视频编码——含上报了 HEVC 能力的 Safari——不会进这里，已在第 1/2 步直链或重封装。）
+	if needFix && !decodable {
 		return Decision{Level: L4External, Label: "外部",
 			Reason: "视频编码（如 HEVC/H.265）浏览器无法直接解码，且未开启或不支持转码，已唤起外部播放器（可在「设置」开启「允许视频转码」页内播）",
 			SupportsRange: in.SupportsRange}

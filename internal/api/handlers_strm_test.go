@@ -36,6 +36,8 @@ func makeVp9MKV(t *testing.T) string {
 // 媒体服务把任意路径都当作该 MKV 返回，便于模拟无扩展名直链。
 func strmServerWithStore(t *testing.T, mkv string) (*httptest.Server, store.Store, func(method, path, body string) (int, string)) {
 	t.Helper()
+	// 关掉 HLS 以锁定 remux URL 旧断言（HLS 交付单独测）。
+	t.Setenv("VIDRIVE_HLS", "0")
 	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/x-matroska")
 		http.ServeFile(w, r, mkv)

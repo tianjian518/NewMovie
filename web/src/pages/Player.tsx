@@ -13,10 +13,19 @@ function fmtTime(sec: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+// isHlsUrl 判断播放地址是否为 HLS 索引（.m3u8）。
+// 注意 URL 带 ?token= 等 query，故先看 path 再判扩展名，不能只看 endsWith。
+function isHlsUrl(u?: string): boolean {
+  if (!u) return false;
+  const path = u.split("?")[0];
+  return path.endsWith(".m3u8");
+}
+
 // 播放页：请求五级降级决策，按策略渲染。
 //  L0/L1 → ArtPlayer 直接播
-//  L2    → 服务端实时转封装（MKV 等）后页内播，支持选音轨
-//  L3/L4 → 唤起外部播放器（直链传递）
+//  L2/L3 → 服务端实时转封装/转码；默认切 HLS 分片（hls.js 拉取，拖动精准、通用性强），
+//           仍可经 remux 端点选音轨（HLS 暂未接 atrack，故 HLS 下隐藏音轨切换）
+//  L4    → 唤起外部播放器（直链传递）
 // 字幕经后端转成 WebVTT 后可切换；多音轨 MKV 经 remux 选轨。
 // 进度全程回传后端（继续观看）。
 export default function Player() {
@@ -82,7 +91,7 @@ export default function Player() {
       const art = new ArtPlayer({
         container: ref.current,
         url: dec.url,
-        type: dec.url.endsWith(".m3u8") ? "m3u8" : "auto",
+        type: isHlsUrl(dec.url) ? "m3u8" : "auto",
         autoplay: true,
         playbackRate: true,
         subtitle: { encoding: "utf-8" },
@@ -136,6 +145,8 @@ export default function Player() {
   const ext = dec.raw_url || dec.direct_url;
   const subs = dec.subtitles || [];
   const auds = dec.audio_tracks || [];
+  // 多音轨 MKV 经 atrack 选语言：单 MP4 流（remux/transcode）与 HLS（分片端点按音轨建独立会话）
+  // 均支持，故 HLS 下也允许切换。
   const canSwitchAud = dec.level === 2 && auds.length > 1;
 
   return (

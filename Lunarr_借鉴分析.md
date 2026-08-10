@@ -34,8 +34,10 @@
 |---|---|---|---|
 | **容器魔数嗅探** | `container-format.ts:detectContainerFromMagic` | 新增 `internal/playback/container.go:SniffContainer`，并在 `handlers.go:sniffContainer` 接入 ffprobe 之后的兜底 | 无扩展名 strm 不依赖扩展名/ffprobe 也能认出容器（mp4/mkv/webm/avi/ts），比猜扩展名更稳，直接强化第十节修复 |
 | **编解码器变体归一** | `capabilities.ts:isHevcCodec/isH264Codec/isAv1Codec/isVp9Codec/isAacCodec` | 新增 `internal/playback/codec.go:NormalizeCodecName` + `IsHEVC/IsH264/IsAV1/IsVP9/IsAAC`，接入 `selector.go:Select` | 真实 ffprobe 常报 `avc1.4d0028`/`hvc1.1.6`/`av01.0.08M`/`mp4a.40.2` 等变体位，归一后判断更准，避免「能解却被误判转码/外放」 |
+| **客户端能力协商** | `capabilities.ts` 前端 `canPlayType` 探测后上报 `?hevc=&av1=&vp9=` | 前端 `web/src/api.ts:clientCaps()` 探测 `video/mp4;codecs="hvc1/hev1"`、`av01`、`vp9`，缓存一次后随 `/api/items/:id/play` 上报；后端 `handlers.go:capFlag` 解析并填 `playback.Input{ClientHEVC/ClientAV1/ClientVP9}`；`selector.go:clientDecodable` 据此判断「浏览器原生可解」，**取代原来硬编码的 `nativeVideo` 假设** | Safari（原生 HEVC）不再白白转码直下 HEVC-MP4；AV1 硬件解码的 Chrome 同理直链。省 CPU、起播更快。最大收益点已落地 |
+| **HLS 流式（请求驱动分片）** | `ffmpegHlsArgs`：`libx264 -crf N -pix_fmt yuv420p -c:a aac`，`-f hls -hls_time -hls_playlist_type event -hls_flags independent_segments+temp_file`，GOP 对齐 | 新增 `internal/hls` 包（`Manager`/`Session`/`BuildArgs`/`RewritePlaylist`）+ `handlers.go:handleHLS` + `playItem` L2/L3 分支 + 前端 `Player.tsx:isHlsUrl` 走 hls.js。单 ffmpeg 全量切片写到磁盘，会话按 `sha256(src\|mode\|atrack)` 去重，TTL 清理 + 并发上限淘汰 | 根治 HEVC（转成 H.264 HLS 人人可播）+ 拖拽/Range 更稳 + 经 hls.js 全浏览器可播。`-c copy` 重封装零重编码、秒播；音轨不兼容（DTS/TrueHD/Atmos）自动转 AAC；多音轨选语言（`atrack`） |
 
-> 测试：`internal/playback/container_test.go`、`internal/playback/codec_test.go` 全绿；`go build ./...` / `go test ./internal/playback/ ./internal/api/` 通过。
+> 测试：`internal/playback/container_test.go`、`internal/playback/codec_test.go` 全绿；`internal/hls/hls_test.go`（含真实 ffmpeg 集成 `TestManagerGenerate`）、`internal/api/handlers_hls_test.go`（全 HTTP 链路）全绿；`go build ./...` / `go test ./...` 通过；`web/src` 经 `tsc --noEmit` 校验通过。
 
 ### 🟡 已对齐 / 待增强（原则一致，可补细节）
 
@@ -43,13 +45,11 @@
 |---|---|
 | **选择器原则：HEVC 不重封装** | NewMovie `selector.go` 已与 Lunarr 一致——HEVC 不进 `nativeVideo`，无转码时落 L4 而非重封装成浏览器解不了的 HEVC-MP4。第十节修复已验证。**这一点我们本来就对，无需改。** |
 | **转码策略模型** | Lunarr 有 `playbackPreference`(auto/prefer_direct/prefer_transcode) + 质量预设(720p/1080p/original, CRF/码率) + 硬件加速(vaapi/nvenc/qsv/videotoolbox/amf)。NewMovie 目前只有「允许转码」开关。可补「偏好直链/转码」与质量上限，工作量小、纯配置。 |
-| **客户端能力协商** | Lunarr 前端探测 `canPlayType` 后上报，后端据此决定直链/转码。**最大收益点**：NewMovie 现在假设「通用浏览器」（HEVC 不算原生），于是在 **Safari（原生支持 HEVC）上也会白白转码**；AV1 硬件解码的 Chrome 同理。补上后：Safari 的 HEVC-in-MP4 可直链、AV1 可直链，省 CPU。需前端 + API 契约改动，中等工作量。 |
 
 ### 🔴 建议大改（架构级，需拍板）
 
 | 项 | Lunarr 做法 | 对 NewMovie 的意义 | 工作量 |
 |---|---|---|---|
-| **HLS 流式（请求驱动分片）** | ffmpeg 输出 `libx264 -crf N -pix_fmt yuv420p -c:a aac -ac 2`，`-f hls -hls_time -hls_playlist_type event -hls_flags independent_segments+temp_file`，GOP 对齐分片 | 根治 HEVC（转成 H.264 HLS）+ 拖拽/Range 更稳 + 经 hls.js 全浏览器可播。当前 NewMovie 是「整文件/分片 MP4 重封装」，能用但 HLS 是更标准的 Plex/Jellyfin 解法 | 大：需 `master.m3u8`/`segments` 路由、分片生成（ffmpeg 配方已可从 `ffmpegHlsArgs` 直接抄）、前端 hls.js、播放会话/心跳 |
 | **播放会话 / 进度** | `sessions-store.ts` + 心跳，断点续播 | NewMovie 已有观看进度，会话模型可选 | 中 |
 | **存储抽象（Range 流）** | `LibraryStorage.createReadStream(filePath, range)` | NewMovie 的 139cas + `openPlaySource` 已实现 Range 取流，**此点无需抄** | — |
 
@@ -83,8 +83,9 @@ ffmpeg -hide_banner -y [-ss 起点]
 
 ## 四、结论与建议下一步
 
-1. **本次已交付**（安全、已测、已接）：容器魔数嗅探 + 编解码器变体归一。直接强化无扩展名 Strm 的容器识别，不引入架构风险。
-2. **强烈建议下一步**：**客户端能力协商**（前端 `canPlayType` 上报 → 后端决策）。纯收益、工作量中等，能让 Safari/AV1 设备免转码直链。
-3. **架构级候选**：**HLS 流式**。收益最大（根治 HEVC + 拖拽），但改动面大，建议单独立项、先在小范围验证 ffmpeg 配方与 hls.js 前端，再全量替换现有 MP4 重封装路径。
+1. **已交付（安全、已测、已接）**：容器魔数嗅探 + 编解码器变体归一（强化无扩展名 Strm 的容器识别，不引入架构风险）。
+2. **已交付（本次新增）**：**客户端能力协商**（前端 `canPlayType` 探测 HEVC/AV1/VP9 → 随播放请求上报 → 后端 `clientDecodable` 决策）。纯收益、零回归，Safari/AV1 设备免转码直链，省 CPU。
+3. **已交付（本次新增，架构级）**：**HLS 流式**（请求驱动、单 ffmpeg 全量切片、会话去重 + 清理 + 并发淘汰、remux `-c copy` 秒播 / transcode `libx264` 人人可播 / 音轨不兼容转 AAC / 多音轨选语言）。根治 HEVC 播放（转成 H.264 HLS）+ 拖拽/Range 更稳 + hls.js 全浏览器可播。ffmpeg 配方直接来自 `ffmpegHlsArgs`，已完整移植并经真实 ffmpeg 集成测试验证。
+4. **剩余候选**：**转码策略模型**（偏好直链/转码 + 质量上限 + 硬件加速）、**播放会话/心跳**（NewMovie 已有进度，可选）。
 
-> 注：Lunarr 的 `storage`（Range 取流）、`sessions`（进度）NewMovie 已有等价实现，**不在借鉴范围**。
+> 注：Lunarr 的 `storage`（Range 取流）、`sessions`（进度）NewMovie 已有等价实现，**不在借鉴范围**。三大可移植点中，仅「转码策略模型」尚未落地，其余均已交付。

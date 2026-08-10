@@ -36,6 +36,23 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   return resp.json() as Promise<T>;
 }
 
+// 探测浏览器原生解码能力（参考 Lunarr 的客户端能力协商）。
+// 探测结果随播放请求上报给后端（?hevc=1&av1=1&vp9=0），让 HEVC(Safari)/AV1/VP9
+// 这类「能解但需协商」的编码不必被无谓转码。canPlayType 返回 "" 表示不能解，
+// "maybe"/"probably" 表示能解——非空即视为可解。结果缓存一次，避免重复创建元素。
+let _capsCache: Record<string, boolean> | null = null;
+function clientCaps(): Record<string, boolean> {
+  if (_capsCache) return _capsCache;
+  const v = document.createElement("video");
+  const probe = (type: string) => v.canPlayType(type) !== "";
+  _capsCache = {
+    hevc: probe('video/mp4; codecs="hvc1.1.6.L93.B0"') || probe('video/mp4; codecs="hev1.1.6.L93.B0"'),
+    av1: probe('video/mp4; codecs="av01.0.08M.08"'),
+    vp9: probe('video/webm; codecs="vp9"') || probe('video/mp4; codecs="vp9"'),
+  };
+  return _capsCache;
+}
+
 export const api = {
   health: () => req<Health>("/api/health"),
   login: (username: string, password: string) =>
@@ -85,8 +102,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ tmdb_id, kind }),
     }),
-  play: (fileId: string) =>
-    req<PlayDecision>("/api/items/" + fileId + "/play"),
+  // 播放决策：先探测浏览器原生解码能力（HEVC/AV1/VP9），随请求上报给后端，
+  // 让能原生解码的编码走直链/重封装而非无谓转码（参考 Lunarr 能力协商）。
+  play: (fileId: string) => {
+    const caps = clientCaps();
+    const qs = new URLSearchParams();
+    qs.set("hevc", caps.hevc ? "1" : "0");
+    qs.set("av1", caps.av1 ? "1" : "0");
+    qs.set("vp9", caps.vp9 ? "1" : "0");
+    return req<PlayDecision>("/api/items/" + fileId + "/play?" + qs.toString());
+  },
 
   // 全局搜索 / 筛选 / 排序
   search: (p: { q?: string; kind?: string; library?: string; sort?: string; limit?: number }) => {

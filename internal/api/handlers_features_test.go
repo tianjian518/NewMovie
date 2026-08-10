@@ -17,6 +17,9 @@ import (
 // featureFixture 建一个带数据的测试服务端。
 func featureFixture(t *testing.T) (store.Store, func(method, path, body string) (int, string)) {
 	t.Helper()
+	// 选择器回归测试：HLS 是独立的交付层，这里关掉以锁定「决策→remux/transcode URL」的旧断言；
+	// HLS 交付路径由 handlers_hls_test.go 单独覆盖。
+	t.Setenv("VIDRIVE_HLS", "0")
 	st, err := store.NewJSONStore(t.TempDir() + "/v.json")
 	if err != nil {
 		t.Fatalf("store: %v", err)

@@ -26,6 +26,8 @@ import (
 
 func videoAuthFixture(t *testing.T) (store.Store, *httptest.Server) {
 	t.Helper()
+	// 关掉 HLS 以锁定 remux URL 旧断言（HLS 交付单独测）。
+	t.Setenv("VIDRIVE_HLS", "0")
 	st, err := store.NewJSONStore(t.TempDir() + "/v.json")
 	if err != nil {
 		t.Fatalf("store: %v", err)

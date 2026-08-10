@@ -27,6 +27,7 @@ import (
 
 	"newmovie/internal/auth"
 	"newmovie/internal/config"
+	"newmovie/internal/hls"
 	"newmovie/internal/model"
 	"newmovie/internal/openlist"
 	"newmovie/internal/playback"
@@ -54,6 +55,12 @@ type Server struct {
 	// 构建不含 libx264，此时重封装(L2)仍可用，但转码(L3)不可用——缺则 HEVC 改走
 	// L2 重封装（保留 HEVC，仅 HEVC 能力浏览器可播）而非返回空 200 让播放器黑屏。
 	transcodeOK bool
+
+	// hlsMgr 管理 HLS 按需切片会话（见 internal/hls）。L2/L3 播放经它切 HLS 分片，
+	// 浏览器用 hls.js 拉取，拖动精准、起播快、通用性强（对标 Plex/Jellyfin/Lunarr）。
+	hlsMgr *hls.Manager
+	// hlsEnabled 是否用 HLS 交付 L2/L3（默认开；VIDRIVE_HLS=0/off/false 关闭，退回单 MP4 流）。
+	hlsEnabled bool
 
 	// scanMu/scanning 保证同一媒体库同时只有一个扫描协程。
 	// 没有这把锁时，前端连点两下「扫描」（或页面轮询期间用户手抖）就会起两个
@@ -118,6 +125,25 @@ func New(st store.Store, cfg *config.Config) *Server {
 			"请用含 ffmpeg 的镜像（tianjian518/newmovie:latest 已含 ffmpeg）")
 	}
 
+	// HLS 按需切片：默认开启（hls.js 已内置前端，L2/L3 切 HLS 分片更稳更通用）。
+	// 可用 VIDRIVE_HLS=0/off/false 关闭，退回原有「单 MP4 流」重封装/转码。
+	s.hlsEnabled = true
+	hlsEnv := os.Getenv("VIDRIVE_HLS")
+	if hlsEnv == "0" || hlsEnv == "off" || hlsEnv == "false" {
+		s.hlsEnabled = false
+	}
+	hlsDir := os.Getenv("VIDRIVE_HLS_DIR")
+	if hlsDir == "" {
+		hlsDir = os.Getenv("NEWMOVIE_HLS_DIR")
+	}
+	s.hlsMgr = hls.New(hlsDir)
+	s.hlsMgr.StartCleanup(time.Minute)
+	if s.hlsEnabled {
+		log.Printf("[info] HLS 按需切片已启用（缓存目录 %s）", s.hlsMgr.Dir())
+	} else {
+		log.Printf("[info] HLS 按需切片已关闭（VIDRIVE_HLS=%s），L2/L3 退回单 MP4 流", hlsEnv)
+	}
+
 	// 图片代理：把 TMDB 图片直链改写成经本服务 /api/image 的地址，浏览器只跟 8096 入口，
 	// 由服务端去取图并缓存。解决「image.tmdb.org 被墙 → 海报全白」的问题（与 2.0 单端口模型一致）。
 	tmdb.SetImageProxyPrefix("/api/image?u=")
@@ -174,6 +200,16 @@ func appendToken(u, tok string) string {
 		sep = "&"
 	}
 	return u + sep + "token=" + url.QueryEscape(tok)
+}
+
+// capFlag 解析客户端能力上报参数（?hevc=1 / ?av1=true / ?vp9=probably）。
+// 未上报时返回默认值 def：vp9/av1 默认 true（旧前端/直接 API 不报也按可解），hevc 默认 false。
+func capFlag(r *http.Request, key string, def bool) bool {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return def
+	}
+	return v == "1" || v == "true" || v == "probably"
 }
 
 func (s *Server) requireUser(r *http.Request) (model.User, bool) {
@@ -1081,6 +1117,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 		s.handleSubtitle(w, r)
 		return
 	}
+	if len(parts) >= 3 && parts[2] == "hls" && r.Method == http.MethodGet {
+		s.handleHLS(w, r, parts)
+		return
+	}
 	if len(parts) >= 3 && parts[2] == "proxy" && r.Method == http.MethodGet {
 		raw := r.URL.Query().Get("u")
 		if raw == "" {
@@ -1168,7 +1208,15 @@ func (s *Server) allowedLocalRoot(p string) bool {
 //   - file:// 本地绝对路径：供 CloudDrive2 等本地 strm 直接读盘，不经过网络。
 //
 // 返回值：(流, HTTP 状态码, 错误)。成功时状态码为 0；失败时流为 nil、状态码用于回写。
+// 取流用的 context 来自请求；HLS 等长耗时切片的场景改用 openPlaySourceCtx 传入
+// context.Background()，让源流在 HTTP 请求返回后依然存活（见 handleHLS）。
 func (s *Server) openPlaySource(r *http.Request, raw string) (io.ReadCloser, int, error) {
+	return s.openPlaySourceCtx(r.Context(), raw)
+}
+
+// openPlaySourceCtx 是 openPlaySource 的 context 可控版本，供后台任务（如 HLS 切片）
+// 用独立的生命周期持有源流。
+func (s *Server) openPlaySourceCtx(ctx context.Context, raw string) (io.ReadCloser, int, error) {
 	if strings.HasPrefix(raw, "file://") {
 		p := strings.TrimPrefix(raw, "file://")
 		if !path.IsAbs(p) {
@@ -1190,7 +1238,7 @@ func (s *Server) openPlaySource(r *http.Request, raw string) (io.ReadCloser, int
 		return nil, http.StatusBadRequest, err
 	}
 	client := s.proxyClientFor(target)
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, http.StatusBadRequest, errors.New("构造请求失败")
 	}
@@ -1321,6 +1369,110 @@ func (s *Server) streamFFmpeg(w http.ResponseWriter, r *http.Request, bin string
 	if err := cmd.Wait(); err != nil && ffmpegErr.Len() > 0 {
 		log.Printf("ffmpeg: %s", ffmpegErr.String())
 	}
+}
+
+// handleHLS 提供 HLS 按需切片的两个资源（分片用 ?key= 定位会话，与播放列表请求解耦）：
+//   - /api/play/hls/index.m3u8?u=<源>&mode=remux|transcode[&aac=1][&atrack=N]&token=<鉴权>
+//     触发（或复用）切片会话，等待索引生成后返回（分片 URL 已注入 key 与 token）。
+//   - /api/play/hls/seg/<name>?key=<会话key>&token=<鉴权>
+//     等待分片落盘后以静态文件服务（支持 Range，拖动精准）。
+// key = sha256(源|模式|音轨)，同一文件重复播放复用同一 ffmpeg 会话（见 internal/hls）。
+func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request, parts []string) {
+	if len(parts) < 4 {
+		writeErr(w, http.StatusBadRequest, "HLS 路径格式错误")
+		return
+	}
+	switch parts[3] {
+	case hls.PlaylistName:
+		raw := r.URL.Query().Get("u")
+		mode := r.URL.Query().Get("mode")
+		if raw == "" {
+			writeErr(w, http.StatusBadRequest, "缺少 u 参数")
+			return
+		}
+		aac := r.URL.Query().Get("aac") == "1"
+		atrack := -1
+		if v := r.URL.Query().Get("atrack"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				atrack = n
+			}
+		}
+		// key 由 源+模式+音轨 稳定哈希，playlist 与 seg 请求据此定位同一会话。
+		key := hls.KeyFor(raw, mode, atrack)
+		if _, err := s.hlsMgr.Acquire(raw, mode, aac, atrack, s.hlsOpener(raw)); err != nil {
+			writeErr(w, http.StatusBadGateway, "启动 HLS 生成失败: "+err.Error())
+			return
+		}
+		path, err := s.hlsMgr.WaitPlaylist(key, hls.PlaylistWait)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "HLS 索引生成失败: "+err.Error())
+			return
+		}
+		s.serveHLSPlaylist(w, r, path, key)
+	case "seg":
+		if len(parts) < 5 {
+			writeErr(w, http.StatusBadRequest, "缺少分片名")
+			return
+		}
+		name := parts[4]
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			writeErr(w, http.StatusBadRequest, "缺少 key 参数")
+			return
+		}
+		path, err := s.hlsMgr.WaitSegment(key, name, hls.SegmentWait)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "HLS 分片不存在: "+err.Error())
+			return
+		}
+		s.serveHLSSegment(w, r, path)
+	default:
+		writeErr(w, http.StatusNotFound, "未知 HLS 资源: "+parts[3])
+	}
+}
+
+// hlsOpener 返回 SSRF 守卫后的取流闭包，供 HLS 会话在后台（与 HTTP 请求解耦的
+// context.Background() 生命周期）持有源流。
+func (s *Server) hlsOpener(raw string) func() (io.ReadCloser, error) {
+	return func() (io.ReadCloser, error) {
+		src, _, err := s.openPlaySourceCtx(context.Background(), raw)
+		return src, err
+	}
+}
+
+// serveHLSPlaylist 读索引并改写分片 URL（注入 key 与 token），以 application/vnd.apple.mpegurl 返回。
+func (s *Server) serveHLSPlaylist(w http.ResponseWriter, r *http.Request, path, key string) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "读取 HLS 索引失败")
+		return
+	}
+	tok := r.URL.Query().Get("token")
+	content = hls.RewritePlaylist(content, tok, key)
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := w.Write(content); err != nil {
+		log.Printf("[hls] 写索引失败: %v", err)
+	}
+}
+
+// serveHLSSegment 以静态文件服务分片，支持 Range（拖动精准），分片为独立 GOP 故可随机起播。
+func (s *Server) serveHLSSegment(w http.ResponseWriter, r *http.Request, path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "分片不存在")
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "读取分片状态失败")
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp2t")
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
 }
 
 // handleSubtitle 取外挂字幕字节并转成 WebVTT 返回给播放器。
@@ -1808,6 +1960,13 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		TranscodeEnabled: transcode,
 		FFmpegAvailable:  s.ffmpegOK,
 		TranscodeAvailable: s.transcodeOK,
+		// 客户端解码能力（前端 canPlayType 探测后上报，参考 Lunarr 能力协商）。
+		// 默认 vp9/av1=true（沿用旧行为：旧前端/直接 API 不报时也按可解处理），
+		// hevc=false（旧实现从不把 HEVC 当原生）。新前端会按真实能力覆盖——
+		// 例如 Safari 报 hevc=1 即可直链 HEVC-in-MP4，Chrome 报 hevc=0 仍正常转码/外放。
+		ClientHEVC: capFlag(r, "hevc", false),
+		ClientAV1:  capFlag(r, "av1", true),
+		ClientVP9:  capFlag(r, "vp9", true),
 	}
 	dec := playback.Select(in)
 
@@ -1823,25 +1982,43 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	directURL = s.rewriteBundledURL(directURL)
 
 	// L2 重封装 / L3 视频转码：浏览器不认 MKV 等容器，或解不了视频编码（HEVC）。
-	// 把源交给 /api/play/remux（或 /api/play/transcode）实时处理成 MP4 流式播放。
+	// 把源交给 HLS 切片（默认，见 internal/hls）或原有单 MP4 流端点实时处理。
 	if dec.Level == playback.L2Remux || dec.Level == playback.L3Transcode {
 		if src := playback.PickURL(in); src != "" {
-			if dec.Level == playback.L3Transcode {
-				dec.URL = playback.TranscodeURL(src)
-			} else {
-				u := playback.RemuxURL(src)
-				// 音轨不兼容 MP4（DTS/TrueHD/Atmos）：让 remux 端点视频拷贝、音轨转 AAC。
+			if s.hlsEnabled {
+				// HLS 按需切片：把源切成独立分片（index.m3u8 + seg_*.ts），浏览器用 hls.js 拉取。
+				// 分片为静态文件、支持 Range、GOP 对齐，拖动精准、起播快、通用性强
+				// （对标 Plex/Jellyfin/Lunarr）。会话 key 由「源+模式+音轨」稳定哈希，
+				// 重复播放/选音轨复用同一 ffmpeg（见 internal/hls），由端点按 query 计算。
+				mode := "remux"
+				if dec.Level == playback.L3Transcode {
+					mode = "transcode"
+				}
+				u := "/api/play/hls/" + hls.PlaylistName +
+					"?u=" + url.QueryEscape(src) + "&mode=" + mode
+				// 音轨不兼容浏览器（DTS/TrueHD/Atmos）：让 HLS 端点视频拷贝、音轨转 AAC
+				// （TS 虽能装 DTS，但浏览器解不了，仍需转 AAC 才能出声）。
 				if dec.NeedsAudioTranscode {
 					u += "&aac=1"
 				}
-				dec.URL = u
+				dec.URL = appendToken(u, getToken(r))
+				// HLS 分片是静态文件，天然支持 Range/拖动。
+				dec.SupportsRange = true
+			} else {
+				// 退回原有单 MP4 流：remux/transcode 端点实时处理成 fragmented MP4 流式播放。
+				if dec.Level == playback.L3Transcode {
+					dec.URL = playback.TranscodeURL(src)
+				} else {
+					u := playback.RemuxURL(src)
+					if dec.NeedsAudioTranscode {
+						u += "&aac=1"
+					}
+					dec.URL = u
+				}
+				// 重封装/转码流无法可靠响应 Range，页内从头播即可（fragmented mp4 仍可拖）。
+				dec.SupportsRange = false
+				dec.URL = appendToken(dec.URL, getToken(r))
 			}
-			// 重封装/转码流无法可靠响应 Range，页内从头播即可（fragmented mp4 仍可拖）。
-			dec.SupportsRange = false
-			// 关键：<video src> 由浏览器直接发起，**无法携带 Authorization 头**，
-			// 于是 /api/play/remux 会 401、页面一片黑。后端本就支持 ?token= 兜底
-			// （见 getToken），这里在下发的 URL 上直接带上，前端零改动即可播。
-			dec.URL = appendToken(dec.URL, getToken(r))
 		} else {
 			// 拿不到源地址：明确报错，而不是静默返回空 URL（否则前端 ArtPlayer 报「视频不存在」）。
 			writeErr(w, http.StatusBadGateway,

@@ -18,6 +18,8 @@ import (
 // 内置后端地址固定为 http://127.0.0.1:5244。返回的 srv 可手动改 ffmpegOK 等字段。
 func bundledFixture(t *testing.T) (store.Store, func(method, path, body string) (int, string), *Server) {
 	t.Helper()
+	// 同 featureFixture：关掉 HLS 以锁定 remux/transcode URL 旧断言（HLS 交付单独测）。
+	t.Setenv("VIDRIVE_HLS", "0")
 	st, err := store.NewJSONStore(t.TempDir() + "/v.json")
 	if err != nil {
 		t.Fatalf("store: %v", err)
