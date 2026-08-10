@@ -16,3 +16,7 @@
 /openlist/bin/
 /openlist/data/
 /openlist/dist.tar.gz
+
+# HLS 分片测试产物（真实 ffmpeg 跑出，不入库）
+/internal/hls/index.m3u8
+/internal/hls/seg_*.ts
