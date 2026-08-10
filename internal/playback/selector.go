@@ -111,11 +111,10 @@ func norm(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 //     而不是返回一个 500 让用户对着「视频不存在」发懵。
 func Select(in Input) Decision {
 	c := norm(in.Container)
-	vc := norm(in.VideoCodec)
-	ac := norm(in.AudioCodec)
-	if vc == "hevc" {
-		vc = "h265"
-	}
+	// 归一编解码器名：处理 avc1./hvc1./av01./mp4a. 等真实变体位（移植自 Lunarr 能力判定），
+	// 避免「浏览器能解却被误判需转码/外放」。HEVC 一并归一到 h265 供后续分支使用。
+	vc := NormalizeCodecName(in.VideoCodec)
+	ac := NormalizeCodecName(in.AudioCodec)
 
 	// L4 优先：用户明确偏好外部播放器
 	if in.PreferExternal {

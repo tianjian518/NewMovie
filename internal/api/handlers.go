@@ -1480,6 +1480,25 @@ func (s *Server) probeFile(ctx context.Context, rawURL string) (dur int, audio [
 	return dur, audio, vc, ac, container, nil
 }
 
+// sniffContainer 读媒体头部若干字节，靠魔数识别容器（移植自 Lunarr detectContainerFromMagic）。
+// 仅作 ffprobe 之后的兜底：ffprobe 已能给容器时不会走到这里。best-effort——
+// 取流失败、读取不足或无法识别都返回空串，交由后续分支（浏览器直链试播 / 外部播放器）兜底。
+// 复用 openPlaySource 的 SSRF 守卫与本地目录白名单，不扩大既有取流的安全边界。
+func (s *Server) sniffContainer(r *http.Request, raw string) string {
+	src, _, err := s.openPlaySource(r, raw)
+	if err != nil {
+		return ""
+	}
+	defer src.Close()
+	// 192 字节足以覆盖 mp4(8)/matroska(4)/avi(12)/ts(189) 的全部魔数判定。
+	buf := make([]byte, 192)
+	n, _ := io.ReadFull(src, buf)
+	if n < 4 {
+		return ""
+	}
+	return playback.SniffContainer(buf[:n])
+}
+
 // normContainer 把 ffprobe 的 format_name（常为逗号分隔列表，如 "matroska,webm"）
 // 归一为 playback 包使用的容器名（mkv/mp4/webm）。未知格式返回空。
 func normContainer(name string) string {
@@ -1724,11 +1743,11 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	// 探测源优先用 raw_url，没有再用 direct_url（OpenList /d/ 中转链同样可被 ffprobe 探测）。
 	// 这一步是 strm 能正确页内播的关键：无扩展名的 strm 直链靠「探测」从媒体内容里认出
 	// 容器/编码，而不是靠猜文件名——猜不出就只会被甩去外部播放器。
+	probeSrc := rawURL
+	if probeSrc == "" {
+		probeSrc = directURL
+	}
 	if f.ProbeState == "pending" {
-		probeSrc := rawURL
-		if probeSrc == "" {
-			probeSrc = directURL
-		}
 		if probeSrc != "" {
 			if dur, atracks, pvc, pac, pcont, perr := s.probeFile(r.Context(), probeSrc); perr == nil {
 				f.DurationSec = dur
@@ -1752,6 +1771,16 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 			// 没有任何可用源可探测：标记 skipped，后面交给浏览器直接试播或外部播放器兜底。
 			f.ProbeState = "skipped"
 			_ = s.Store.SaveMediaFile(f)
+		}
+	}
+
+	// 魔数嗅探兜底（移植自 Lunarr detectContainerFromMagic）：ffprobe 仍认不出容器时
+	// （部分源 format_name 为空，或 ffprobe 不可用），读媒体头几字节靠魔数识别容器
+	// （ftyp→mp4、EBML→mkv/webm、RIFF→avi、0x47→ts）。比猜扩展名更稳，避免无扩展名
+	// strm 因容器推不出而被甩外部播放器。best-effort：任何失败都忽略，沿用现有兜底分支。
+	if f.Container == "" && probeSrc != "" {
+		if c := s.sniffContainer(r, probeSrc); c != "" {
+			f.Container = c
 		}
 	}
 
