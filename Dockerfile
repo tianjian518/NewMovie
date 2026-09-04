@@ -77,14 +77,20 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG GOPROXY
 COPY go.mod go.sum ./
-RUN go mod download || true
+# Go 构建缓存挂载：modernc.org/sqlite 编译体量极大，QEMU 模拟的 arm/v7 上单次全量
+# 编译要 15-30 分钟。挂载 buildkit 缓存后，跨构建/跨架构复用编译产物，后续推送秒级完成。
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download || true
 # openlist/ 是独立 Go 模块，不参与主模块构建，排除掉可以少传几 MB 上下文。
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 # 把前端构建产物带进来，供 Go embed 进二进制
 COPY --from=web /src/cmd/server/dist ./cmd/server/dist
 # arm/v7 需 GOARM=7，其余架构 GOARM 留空（被忽略）。
-RUN GOARM=$( [ "$TARGETARCH" = "arm" ] && echo 7 || echo "" ) && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOARM=$( [ "$TARGETARCH" = "arm" ] && echo 7 || echo "" ) && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOARM=${GOARM} \
     go build -ldflags="-s -w" -o /out/newmovie ./cmd/server
 
