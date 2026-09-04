@@ -158,13 +158,14 @@ export default function Detail() {
 
   return (
     <div>
-      {/* Hero：背景图 + 标题浮层（Emby 风格） */}
+      {/* Hero：背景图 + 毛玻璃标题浮层（Emby Fluent 风格） */}
       <div
         className="relative h-48 md:h-64 rounded-xl mb-4 overflow-hidden bg-cover bg-center"
         style={{ backgroundImage: item.backdrop_url ? `url("${item.backdrop_url}")` : undefined, background: "#171b22" }}
       >
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
-        <div className="absolute bottom-0 left-0 p-4 md:p-6">
+        {/* 毛玻璃标题条：backdrop-filter 模糊背景，标题更清晰更有质感 */}
+        <div className="absolute bottom-0 left-0 right-0 p-4 md:p-6 backdrop-blur-md bg-black/30">
           <h1 className="text-2xl md:text-3xl font-bold drop-shadow">
             {item.title}
             {item.year > 0 && <span className="text-gray-300 text-lg md:text-xl"> ({item.year})</span>}

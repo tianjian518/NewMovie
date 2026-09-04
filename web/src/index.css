@@ -38,17 +38,9 @@ a {
   }
 }
 
-/* 按钮/可点击元素最小触摸区域 44px（iOS HIG），手机上更好点 */
+/* 按钮/可点击元素最小触摸区域，手机上更好点 */
 button,
 select,
 input[type="checkbox"] {
   min-height: 36px;
-}
-
-/* 海报卡片按下反馈 */
-.PosterCard {
-  transition: transform 0.15s ease;
-}
-.PosterCard:active {
-  transform: scale(0.97);
 }

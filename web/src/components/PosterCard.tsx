@@ -11,13 +11,13 @@ export default function PosterCard({ item }: { item: MediaItem }) {
   const showImg = Boolean(item.poster_url) && !imgFailed;
 
   return (
-    <div className="bg-card rounded-lg overflow-hidden hover:ring-2 hover:ring-brand transition">
-      <div className="aspect-[2/3] bg-ink relative">
+    <div className="bg-card rounded-lg overflow-hidden transition-all duration-200 ease-out hover:scale-[1.03] hover:shadow-lg hover:shadow-brand/20 hover:ring-2 hover:ring-brand/60 group">
+      <div className="aspect-[2/3] bg-ink relative overflow-hidden">
         {showImg ? (
           <img
             src={item.poster_url}
             alt={item.title}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
             loading="lazy"
             onError={() => setImgFailed(true)}
           />
@@ -26,9 +26,17 @@ export default function PosterCard({ item }: { item: MediaItem }) {
             {item.title.slice(0, 1)}
           </div>
         )}
+        {/* 评分角标 */}
+        {item.rating > 0 && (
+          <span className="absolute top-1 left-1 text-[10px] bg-black/70 text-yellow-400 px-1.5 py-0.5 rounded font-medium">
+            ★ {item.rating.toFixed(1)}
+          </span>
+        )}
         {item.year > 0 && (
           <span className="absolute bottom-1 right-1 text-[10px] bg-black/70 px-1 rounded">{item.year}</span>
         )}
+        {/* 悬停渐变遮罩，让标题更清晰 */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
       </div>
       <div className="p-2 text-sm truncate" title={item.title}>{item.title}</div>
     </div>
