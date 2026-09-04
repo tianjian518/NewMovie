@@ -36,6 +36,10 @@ export default function Player() {
   const [subLang, setSubLang] = useState("off");
   const [audIdx, setAudIdx] = useState(-1);
   const [playErr, setPlayErr] = useState("");
+  // L4 外部播放器进度回传的输入状态。必须放在顶层（所有 early return 之前），
+  // 否则 dec 为 null 时 Hooks 调用顺序不一致，React 会报 "Rendered fewer hooks than expected"。
+  const [minuteStr, setMinuteStr] = useState("");
+  const [secondStr, setSecondStr] = useState("");
   const ref = useRef<HTMLDivElement>(null);
   const artRef = useRef<any>(null);
 
@@ -151,8 +155,6 @@ export default function Player() {
 
   // L4 外部播放器进度回传：外放后把看到的位置手动填回来，
   // 存进「继续观看」（后端 saveRecord 已通用，任何 fileId 都能存）。
-  const [minuteStr, setMinuteStr] = useState("");
-  const [secondStr, setSecondStr] = useState("");
   function reportExtProgress() {
     const m = parseInt(minuteStr || "0", 10);
     const sec = parseInt(secondStr || "0", 10);
