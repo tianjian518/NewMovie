@@ -156,6 +156,23 @@ export default function Detail() {
 
   const sorted = sortEpisodes(files);
 
+  // 「下一集」智能续播（借鉴 Emby）：找到用户最后看到一半的那集，
+  // 如果还有下一集就显示快捷按钮，不用在剧集列表里翻找。
+  // 看完超过 90% 视为已看完，不再作为「续播起点」。
+  const nextEpisode = (() => {
+    let lastWatchedIdx = -1;
+    for (let i = 0; i < sorted.length; i++) {
+      const p = progress[sorted[i].id];
+      if (p && p.duration > 0 && p.position > 0 && p.position < p.duration * 0.9) {
+        lastWatchedIdx = i;
+      }
+    }
+    if (lastWatchedIdx >= 0 && lastWatchedIdx + 1 < sorted.length) {
+      return sorted[lastWatchedIdx + 1];
+    }
+    return null;
+  })();
+
   return (
     <div>
       {/* Hero：背景图 + 毛玻璃标题浮层（Emby Fluent 风格） */}
@@ -179,6 +196,11 @@ export default function Detail() {
             {sorted.length > 0 && (
               <Link to={"/play/" + sorted[0].id} className="bg-brand rounded px-4 py-1.5 text-sm font-semibold">
                 {progress[sorted[0].id] ? "继续播放" : "▶ 播放"}
+              </Link>
+            )}
+            {nextEpisode && (
+              <Link to={"/play/" + nextEpisode.id} className="bg-white/15 hover:bg-white/25 rounded px-4 py-1.5 text-sm font-semibold">
+                下一集{nextEpisode.episode_no > 0 ? ` · 第${nextEpisode.episode_no}集` : ""}
               </Link>
             )}
             <button
