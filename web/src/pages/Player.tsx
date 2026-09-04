@@ -149,6 +149,19 @@ export default function Player() {
   // 均支持，故 HLS 下也允许切换。
   const canSwitchAud = dec.level === 2 && auds.length > 1;
 
+  // L4 外部播放器进度回传：外放后把看到的位置手动填回来，
+  // 存进「继续观看」（后端 saveRecord 已通用，任何 fileId 都能存）。
+  const [minuteStr, setMinuteStr] = useState("");
+  const [secondStr, setSecondStr] = useState("");
+  function reportExtProgress() {
+    const m = parseInt(minuteStr || "0", 10);
+    const sec = parseInt(secondStr || "0", 10);
+    if (isNaN(m) || isNaN(sec) || sec < 0 || sec > 59) return;
+    const position = m * 60 + sec;
+    api.saveRecord(fileId!, position, position + 3600).catch(() => {});
+    setPlayErr("进度已保存，可去「继续观看」接着看。");
+  }
+
   return (
     <div>
       {(dec.title || dec.subtitle) && (
@@ -214,6 +227,34 @@ export default function Player() {
             <a href={ext} target="_blank" rel="noreferrer" className="bg-brand rounded px-4 py-2">
               唤起外部播放器
             </a>
+          )}
+          {dec.level === 4 && (
+            <div className="w-full max-w-xs space-y-2 mt-2">
+              <p className="text-xs text-gray-400">
+                看完后把进度填回来，下次能「继续观看」。
+              </p>
+              <div className="flex items-center gap-2 justify-center">
+                <input
+                  type="number" min={0} placeholder="分"
+                  className="bg-ink rounded px-2 py-1 text-sm w-20 border border-white/10"
+                  value={minuteStr}
+                  onChange={(e) => setMinuteStr(e.target.value)}
+                />
+                <span className="text-gray-400 text-sm">:</span>
+                <input
+                  type="number" min={0} max={59} placeholder="秒"
+                  className="bg-ink rounded px-2 py-1 text-sm w-20 border border-white/10"
+                  value={secondStr}
+                  onChange={(e) => setSecondStr(e.target.value)}
+                />
+                <button
+                  onClick={reportExtProgress}
+                  className="bg-brand rounded px-3 py-1 text-sm shrink-0"
+                >
+                  保存进度
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
