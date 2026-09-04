@@ -76,7 +76,7 @@ WORKDIR /src
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG GOPROXY
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download || true
 # openlist/ 是独立 Go 模块，不参与主模块构建，排除掉可以少传几 MB 上下文。
 COPY cmd/ ./cmd/
