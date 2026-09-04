@@ -113,8 +113,8 @@ export const api = {
     return req<PlayDecision>("/api/items/" + fileId + "/play?" + qs.toString());
   },
 
-  // 全局搜索 / 筛选 / 排序
-  search: (p: { q?: string; kind?: string; library?: string; sort?: string; limit?: number }) => {
+  // 全局搜索 / 筛选 / 排序（支持 offset 分页，供海报墙虚拟滚动按页拉取）
+  search: (p: { q?: string; kind?: string; library?: string; sort?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     Object.entries(p).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
     return req<MediaItem[]>("/api/search?" + qs.toString());

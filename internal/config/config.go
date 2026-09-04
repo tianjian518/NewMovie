@@ -11,7 +11,7 @@ import (
 type Config struct {
 	Addr         string // HTTP 监听地址
 	DataDir      string // 数据根目录 (/data)
-	DBFile       string // JSON 存储文件路径
+	DBFile       string // SQLite 存储文件路径
 	CacheDir     string // 图片/直链缓存根目录 (DataDir/cache)
 	AdminUser    string
 	AdminPass    string
@@ -97,7 +97,7 @@ func Load() *Config {
 	// 反代默认跟随 Bundled：开了内置就默认能在同端口访问挂载管理页。
 	c.BundledProxy = boolenv("NEWMOVIE_BUNDLED_PROXY", c.Bundled)
 
-	c.DBFile = c.DataDir + "/newmovie.json"
+	c.DBFile = c.DataDir + "/newmovie.db"
 	c.CacheDir = c.DataDir + "/cache"
 	return c
 }

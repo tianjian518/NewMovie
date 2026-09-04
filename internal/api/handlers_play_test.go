@@ -83,6 +83,9 @@ func TestPlay_StrmHttpHEVC_TranscodeWhenEnabled(t *testing.T) {
 // TestPlay_StrmHttpHEVC_NoTranscode_External 锁定：HEVC 但未开启/不支持转码时，
 // 唤起外部播放器（明确原因），而不是重封装后在页内一直转圈。
 func TestPlay_StrmHttpHEVC_NoTranscode_External(t *testing.T) {
+	// 显式关闭转码：本机 ffmpeg 若带 libx264，New() 默认会强制开启转码（level=3），
+	// 该测试要锁定的是「未开转码 → L4 外部」分支，故必须把环境变量钉死为 0。
+	t.Setenv("VIDRIVE_TRANSCODE", "0")
 	st, do := featureFixture(t)
 	_ = st.SaveMediaFile(model.MediaFile{
 		ID: "fhevc2", ItemID: "m1", Source: model.SrcStrm,

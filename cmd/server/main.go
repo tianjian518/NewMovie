@@ -32,7 +32,7 @@ func main() {
 		log.Printf("警告：创建数据目录 %s 失败: %v（将以只读模式继续，设置无法持久化）", cfg.DataDir, err)
 	}
 
-	st, err := store.NewJSONStore(cfg.DBFile)
+	st, err := store.NewSQLiteStore(cfg.DBFile)
 	if err != nil {
 		log.Fatalf("打开存储失败: %v", err)
 	}

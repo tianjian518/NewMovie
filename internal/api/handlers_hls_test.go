@@ -52,6 +52,7 @@ func TestHLS_RemuxPipeline(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 不可用，跳过 HLS 集成测试")
 	}
+	enc := requireH264Encoder(t)
 	ts, st, get := newHLSClient(t)
 
 	// 1) h264+aac 的 MKV（与 remux 测试同款源）。
@@ -59,7 +60,7 @@ func TestHLS_RemuxPipeline(t *testing.T) {
 	gen := exec.Command("ffmpeg", "-y", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=duration=3:size=320x180:rate=15",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-		"-c:v", "libopenh264", "-c:a", "aac", "-pix_fmt", "yuv420p", mkv)
+		"-c:v", enc, "-c:a", "aac", "-pix_fmt", "yuv420p", mkv)
 	if out, err := gen.CombinedOutput(); err != nil {
 		t.Fatalf("生成 mkv 失败: %v (%s)", err, out)
 	}

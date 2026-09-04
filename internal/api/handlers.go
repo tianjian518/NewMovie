@@ -37,6 +37,7 @@ import (
 	"newmovie/internal/strm"
 	"newmovie/internal/subtitle"
 	"newmovie/internal/tmdb"
+	"newmovie/internal/webdav"
 )
 
 // Version 是当前服务版本，健康检查与前端一并使用。
@@ -224,7 +225,43 @@ func (s *Server) requireUser(r *http.Request) (model.User, bool) {
 	return u, true
 }
 
-func (s *Server) clientFor(storage model.Storage) *openlist.Client {
+// childModeMaxRating 儿童模式的安全评级上限：超出即过滤。
+const childModeMaxRating = 12.0
+
+// filterItemsForUser 按用户权限过滤条目列表：
+//   - 库白名单：条目所属媒体库不在用户可访问范围则移除（管理员的 AllowedLibs 空=全放行，已在 CanAccess 处理）；
+//   - 儿童模式：仅保留低龄安全内容。当前按「评分上限 + 无剧情评级字段则放行」的保守策略——
+//     rating 未知(<=0) 时放行（可能是动画/纪录片尚未刮到评分），rating>12 时移除。
+func (s *Server) filterItemsForUser(u model.User, items []model.MediaItem) []model.MediaItem {
+	if u.IsAdmin {
+		return items
+	}
+	// 先按库白名单过滤
+	var out []model.MediaItem
+	for _, it := range items {
+		if !u.CanAccess(it.LibraryID) {
+			continue
+		}
+		out = append(out, it)
+	}
+	if !u.ChildMode {
+		return out
+	}
+	// 儿童模式二次过滤：只看低龄内容
+	filtered := out[:0]
+	for _, it := range out {
+		if it.Rating > childModeMaxRating {
+			continue
+		}
+		filtered = append(filtered, it)
+	}
+	return filtered
+}
+
+func (s *Server) clientFor(storage model.Storage) openlist.FSClient {
+	if storage.Type == model.StorageWebDAV {
+		return webdav.New(storage.BaseURL, storage.Token)
+	}
 	return &openlist.Client{BaseURL: storage.BaseURL, Token: storage.Token, SignKey: storage.SignKey}
 }
 
@@ -233,7 +270,7 @@ func (s *Server) clientFor(storage model.Storage) *openlist.Client {
 // 逐级剥掉路径前缀重试（/mnt/cloud/媒体/A.mkv → /cloud/媒体/A.mkv → /媒体/A.mkv → /A.mkv），
 // 命中即用。返回最终命中的 link 与用于后续（签名/容器探测）的 actual 路径。
 // 这是「无论什么 strm 都能页内播放」的零配置兜底：用户不必为路径前缀差异做任何配置。
-func (s *Server) resolveOpenListLink(cl *openlist.Client, path string) (*openlist.FsGetResp, string) {
+func (s *Server) resolveOpenListLink(cl openlist.FSClient, path string) (*openlist.FsGetResp, string) {
 	p := path
 	last := p
 	for {
@@ -377,6 +414,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			return
 		case "rewrites":
 			s.handleRewrites(w, r, parts)
+			return
+		case "users":
+			s.handleUsers(w, r, parts)
 			return
 		case "settings":
 			if len(parts) == 4 && parts[2] == "tmdb" && parts[3] == "test" && r.Method == http.MethodPost {
@@ -593,6 +633,7 @@ func suggestMode(video, strm int) string {
 // testStorage 不落盘，仅验证连通性并返回已挂载网盘列表。
 func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Type    string `json:"type"`
 		BaseURL string `json:"base_url"`
 		Token   string `json:"token"`
 		SignKey string `json:"sign_key"`
@@ -601,7 +642,12 @@ func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请求体错误")
 		return
 	}
-	cl := &openlist.Client{BaseURL: body.BaseURL, Token: body.Token, SignKey: body.SignKey}
+	var cl openlist.FSClient
+	if body.Type == "webdav" {
+		cl = webdav.New(body.BaseURL, body.Token)
+	} else {
+		cl = &openlist.Client{BaseURL: body.BaseURL, Token: body.Token, SignKey: body.SignKey}
+	}
 	drives, err := cl.ListDrives()
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
@@ -616,6 +662,17 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 	switch {
 	case len(parts) == 2 && r.Method == http.MethodGet:
 		list, _ := s.Store.ListLibraries()
+		u, _ := s.requireUser(r)
+		// 权限隔离：非管理员只返回自己可访问的媒体库。
+		if !u.IsAdmin && len(u.AllowedLibs) > 0 {
+			filtered := list[:0]
+			for _, l := range list {
+				if u.CanAccess(l.ID) {
+					filtered = append(filtered, l)
+				}
+			}
+			list = filtered
+		}
 		writeJSON(w, list)
 	case len(parts) == 2 && r.Method == http.MethodPost:
 		var lib model.Library
@@ -644,8 +701,13 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 			writeErr(w, http.StatusNotFound, "媒体库不存在")
 			return
 		}
+		u, _ := s.requireUser(r)
+		if !u.CanAccess(lib.ID) {
+			writeErr(w, http.StatusForbidden, "无权访问该媒体库")
+			return
+		}
 		items, _ := s.Store.ListMediaItems(lib.ID)
-		writeJSON(w, items)
+		writeJSON(w, s.filterItemsForUser(u, items))
 	case len(parts) == 4 && parts[3] == "scan" && r.Method == http.MethodGet:
 		// 返回该媒体库最近一次扫描任务，供海报墙自动轮询进度。
 		job, err := s.Store.GetLatestScanJob(parts[2])
@@ -744,8 +806,17 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request, parts []str
 			writeErr(w, http.StatusNotFound, "条目不存在")
 			return
 		}
-		files, _ := s.Store.ListMediaFiles(item.ID)
 		u, _ := s.requireUser(r)
+		// 权限隔离：非管理员无权查看不可访问库的条目；儿童模式下限制级条目不可见。
+		if !u.CanAccess(item.LibraryID) {
+			writeErr(w, http.StatusForbidden, "无权访问该条目")
+			return
+		}
+		if u.ChildMode && item.Rating > childModeMaxRating {
+			writeErr(w, http.StatusForbidden, "儿童模式下不可查看该条目")
+			return
+		}
+		files, _ := s.Store.ListMediaFiles(item.ID)
 		// 顺手带上每个文件的观看进度和该条目的收藏状态，
 		// 省得前端为了画个进度条再打 N 次请求。
 		progress := map[string]map[string]int{}
@@ -790,10 +861,37 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	u, _ := s.requireUser(r)
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	libFilter := strings.TrimSpace(r.URL.Query().Get("library"))
 	sortBy := strings.TrimSpace(r.URL.Query().Get("sort"))
+	lim := 0
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lim = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+
+	// SQLite 存储：搜索下沉到 SQL（LIKE + 索引 + LIMIT），避免全库线性扫描。
+	// JSON store 无此能力时回退到下方线性扫描，行为一致。
+	if searcher, ok := s.Store.(interface {
+		SearchMediaItems(q, kind, libID, sortBy string, offset, limit int) ([]model.MediaItem, error)
+	}); ok {
+		items, err := searcher.SearchMediaItems(q, kind, libFilter, sortBy, offset, lim)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "搜索失败")
+			return
+		}
+		writeJSON(w, s.filterItemsForUser(u, items))
+		return
+	}
 
 	libs, _ := s.Store.ListLibraries()
 	out := []model.MediaItem{}
@@ -813,6 +911,7 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 			out = append(out, it)
 		}
 	}
+	out = s.filterItemsForUser(u, out)
 	sort.SliceStable(out, func(i, j int) bool {
 		switch sortBy {
 		case "year":
@@ -830,10 +929,11 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Title < out[j].Title
 	})
-	if lim := r.URL.Query().Get("limit"); lim != "" {
-		if n, err := strconv.Atoi(lim); err == nil && n > 0 && n < len(out) {
-			out = out[:n]
-		}
+	if offset > 0 && offset < len(out) {
+		out = out[offset:]
+	}
+	if lim > 0 && lim < len(out) {
+		out = out[:lim]
 	}
 	writeJSON(w, out)
 }
@@ -996,6 +1096,134 @@ func (s *Server) handleFavorites(w http.ResponseWriter, r *http.Request, parts [
 }
 
 // --- 路径重写规则 ---
+
+// handleUsers 用户管理（仅管理员）：GET 列表 / POST 新建 / PUT 修改 / DELETE 删除。
+// 子账号支持：媒体库白名单（AllowedLibs）+ 儿童模式（ChildMode）。
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request, parts []string) {
+	cur, ok := s.requireUser(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	// 所有写操作仅管理员
+	switch {
+	case len(parts) == 2 && r.Method == http.MethodGet:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可查看用户列表")
+			return
+		}
+		list, _ := s.Store.ListUsers()
+		// 不下发密码哈希，避免泄露
+		sanitized := make([]map[string]interface{}, 0, len(list))
+		for _, u := range list {
+			sanitized = append(sanitized, map[string]interface{}{
+				"id": u.ID, "username": u.Username, "is_admin": u.IsAdmin,
+				"child_mode": u.ChildMode, "allowed_libs": u.AllowedLibs,
+			})
+		}
+		writeJSON(w, sanitized)
+		return
+
+	case len(parts) == 2 && r.Method == http.MethodPost:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可创建用户")
+			return
+		}
+		var body struct {
+			Username    string   `json:"username"`
+			Password    string   `json:"password"`
+			IsAdmin     bool     `json:"is_admin"`
+			ChildMode   bool     `json:"child_mode"`
+			AllowedLibs []string `json:"allowed_libs"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			writeErr(w, http.StatusBadRequest, "请求体错误")
+			return
+		}
+		body.Username = strings.TrimSpace(body.Username)
+		if body.Username == "" || body.Password == "" {
+			writeErr(w, http.StatusBadRequest, "用户名和密码不能为空")
+			return
+		}
+		if _, err := s.Store.GetUserByName(body.Username); err == nil {
+			writeErr(w, http.StatusConflict, "用户名已存在")
+			return
+		}
+		nu := model.User{
+			ID:          auth.GenID("u"),
+			Username:    body.Username,
+			Password:    auth.HashPassword(body.Password),
+			IsAdmin:     body.IsAdmin,
+			ChildMode:   body.ChildMode,
+			AllowedLibs: body.AllowedLibs,
+		}
+		if err := s.Store.SaveUser(nu); err != nil {
+			writeErr(w, http.StatusInternalServerError, "保存用户失败")
+			return
+		}
+		writeJSON(w, map[string]interface{}{"id": nu.ID, "username": nu.Username, "ok": true})
+		return
+
+	case len(parts) == 3 && r.Method == http.MethodPut:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可修改用户")
+			return
+		}
+		u, err := s.Store.GetUserByName(parts[2])
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		var body struct {
+			Password    string   `json:"password"` // 空 = 不改密码
+			IsAdmin     *bool    `json:"is_admin"`
+			ChildMode   *bool    `json:"child_mode"`
+			AllowedLibs []string `json:"allowed_libs"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			writeErr(w, http.StatusBadRequest, "请求体错误")
+			return
+		}
+		if body.Password != "" {
+			u.Password = auth.HashPassword(body.Password)
+		}
+		if body.IsAdmin != nil {
+			u.IsAdmin = *body.IsAdmin
+		}
+		if body.ChildMode != nil {
+			u.ChildMode = *body.ChildMode
+		}
+		u.AllowedLibs = body.AllowedLibs
+		if err := s.Store.SaveUser(u); err != nil {
+			writeErr(w, http.StatusInternalServerError, "保存用户失败")
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true, "username": u.Username})
+		return
+
+	case len(parts) == 3 && r.Method == http.MethodDelete:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可删除用户")
+			return
+		}
+		if cur.Username == parts[2] {
+			writeErr(w, http.StatusBadRequest, "不能删除自己")
+			return
+		}
+		target, err := s.Store.GetUserByName(parts[2])
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		if err := s.Store.DeleteUser(target.ID); err != nil {
+			writeErr(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true})
+		return
+	}
+	writeErr(w, http.StatusNotFound, "unknown users route")
+}
 
 func (s *Server) handleRewrites(w http.ResponseWriter, r *http.Request, parts []string) {
 	switch {

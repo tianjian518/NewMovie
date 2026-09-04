@@ -69,7 +69,7 @@ func (r *RateLimiter) Take() {
 // Scan 对单个媒体库执行扫描（native/strm/mixed 均支持）。
 // searcher 为 TMDB 刮削器（可为 nil 跳过 TMDB）；无 NFO 时 fallback 到它。
 // storages 用于 strm 解析器（mixed/strm 模式）；rewrites 为路径重写规则。
-func Scan(ctx context.Context, lib model.Library, st store.Store, client *openlist.Client,
+func Scan(ctx context.Context, lib model.Library, st store.Store, client openlist.FSClient,
 	storages []model.Storage, rewrites []model.PathRewrite, rate float64,
 	searcher scraper.Searcher, onProgress func(done, total int)) error {
 
@@ -224,7 +224,7 @@ type runner struct {
 	ctx        context.Context
 	lib        model.Library
 	st         store.Store
-	client     *openlist.Client
+	client     openlist.FSClient
 	storages   []model.Storage
 	rewrites   []model.PathRewrite
 	searcher   scraper.Searcher

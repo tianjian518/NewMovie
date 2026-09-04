@@ -176,6 +176,25 @@ type User struct {
 	Password string `json:"password"` // bcrypt/sha256 哈希
 	IsAdmin  bool   `json:"is_admin"`
 	Token    string `json:"-"`
+	// ChildMode 儿童模式：非管理员开启后只能看到可安全播放的条目
+	// （自动过滤 rating>12 的内容，配合「允许的媒体库」双保险）。
+	ChildMode bool `json:"child_mode"`
+	// AllowedLibs 允许访问的媒体库 ID 白名单；空表示全部库可见。
+	// 儿童模式建议配合它把「动画/合家欢」库单独放行，其余库一律不可见。
+	AllowedLibs []string `json:"allowed_libs"`
+}
+
+// CanAccess 判断用户能否访问某个媒体库（空白名单 = 全部放行）。
+func (u User) CanAccess(libID string) bool {
+	if u.IsAdmin || len(u.AllowedLibs) == 0 {
+		return true
+	}
+	for _, id := range u.AllowedLibs {
+		if id == libID {
+			return true
+		}
+	}
+	return false
 }
 
 type PlayRecord struct {

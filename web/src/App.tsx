@@ -273,6 +273,15 @@ function LibraryItems() {
   const [q, setQ] = useState("");
   const [kind, setKind] = useState("");
   const [sortBy, setSortBy] = useState("title");
+  // ---- 虚拟滚动：媒体库可能上万条目，一次全量渲染几百张海报会把 DOM 卡爆。 ----
+  // 方案：按页（limit=PAGE）拉取 + 累积追加；滚动接近底部时加载下一页。
+  // 底部放一个「哨兵」div，用 IntersectionObserver 观测它进入视口即触发 loadMore。
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const lockRef = useRef(false); // 防重复触发 loadMore（并发保护）
+  const PAGE = 96;
   // 所有轮询定时器统一挂 ref，组件卸载时一定清掉。
   // 老实现在 scan() 里 setInterval 却没人管，用户点完扫描立刻切页，
   // 定时器会一直在后台请求，还对着已卸载组件 setState。
@@ -280,19 +289,47 @@ function LibraryItems() {
 
   const clearTick = () => { if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; } };
 
-  const load = useCallback(() => {
+  // load 拉取一页；reset=true 表示重查（关键词/排序/库变化），重置分页从第 0 页开始。
+  const load = useCallback((reset: boolean) => {
     if (!id) return;
     setErr("");
-    api.search({ q, kind, library: id, sort: sortBy })
-      .then(setItems)
+    const off = reset ? 0 : page * PAGE;
+    api.search({ q, kind, library: id, sort: sortBy, limit: PAGE, offset: off })
+      .then((list) => {
+        setItems((prev) => (reset ? list : [...prev, ...list]));
+        setHasMore(list.length === PAGE); // 少于 PAGE 说明到底了
+        if (reset) setPage(1); else setPage((p) => p + 1);
+      })
       .catch((e) => setErr(e?.message || "加载失败"));
-  }, [id, q, kind, sortBy]);
+  }, [id, q, kind, sortBy, page]);
 
-  // 搜索输入做 300ms 防抖，别每敲一个字就打一次接口。
+  // 首次加载 & 搜索/筛选/排序变化时：重置并拉第 0 页
   useEffect(() => {
-    const t = setTimeout(load, q ? 300 : 0);
+    setItems([]);
+    setPage(0);
+    setHasMore(true);
+    const t = setTimeout(() => load(true), q ? 300 : 0);
     return () => clearTimeout(t);
-  }, [load, q]);
+  }, [load, q]); // load 已含 id/q/kind/sortBy，这里额外盯 q 做防抖
+
+  // 底部哨兵：进入视口就加载下一页（提前 600px 预加载，滚动更跟手）
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore) return;
+    const io = new IntersectionObserver((entries) => {
+      if (!entries[0].isIntersecting || lockRef.current || loadingMore) return;
+      lockRef.current = true;
+      setLoadingMore(true);
+      load(false);
+      requestAnimationFrame(() => {
+        lockRef.current = false;
+        setLoadingMore(false);
+      });
+    }, { rootMargin: "600px 0px" });
+    io.observe(sentinel);
+    return () => io.disconnect();
+  }, [hasMore, loadingMore, load]);
+
 
   const poll = useCallback((jobId: string) => {
     clearTick();
@@ -301,7 +338,7 @@ function LibraryItems() {
       try {
         const cur = await api.scanJob(jobId);
         setJob(cur);
-        if (cur.status !== "running") { clearTick(); setScanning(false); load(); }
+        if (cur.status !== "running") { clearTick(); setScanning(false); load(true); }
       } catch {
         clearTick(); setScanning(false);
       }
@@ -387,6 +424,18 @@ function LibraryItems() {
               <Link key={it.id} to={"/item/" + it.id}><PosterCard item={it} /></Link>
             ))}
           </div>
+          {/* 虚拟滚动哨兵：进入视口加载下一页；到底后显示结束提示 */}
+          {hasMore ? (
+            <div ref={sentinelRef} className="py-6 text-center text-xs text-gray-500">
+              {loadingMore ? "加载中…" : "继续下滑加载更多"}
+            </div>
+          ) : (
+            items.length > PAGE && (
+              <div className="py-6 text-center text-xs text-gray-500">
+                已全部加载 · 共 {items.length} 个条目
+              </div>
+            )
+          )}
         </>
       )}
     </div>

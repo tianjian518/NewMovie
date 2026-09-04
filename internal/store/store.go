@@ -61,6 +61,8 @@ type Store interface {
 	GetUserByName(name string) (model.User, error)
 	UpsertToken(userID, token string) error
 	GetUserByToken(token string) (model.User, error)
+	ListUsers() ([]model.User, error)
+	DeleteUser(id string) error
 
 	// 全局设置（如用户自填的 TMDB_API_KEY），键值对持久化。
 	GetSetting(key string) (string, error)
@@ -604,6 +606,27 @@ func (d *db) GetUserByToken(token string) (model.User, error) {
 		if x.ID == uid { return x, nil }
 	}
 	return model.User{}, os.ErrNotExist
+}
+
+// ListUsers 列出全部用户（用户名与权限信息；密码哈希保留但由调用方决定是否外泄）。
+func (d *db) ListUsers() ([]model.User, error) {
+	d.mu.Lock(); defer d.mu.Unlock()
+	out := make([]model.User, len(d.Users))
+	copy(out, d.Users)
+	return out, nil
+}
+
+// DeleteUser 删除用户及其 token。管理员本人不可删（由 API 层保证）。
+func (d *db) DeleteUser(id string) error {
+	d.mu.Lock(); defer d.mu.Unlock()
+	for i, x := range d.Users {
+		if x.ID == id {
+			d.Users = append(d.Users[:i], d.Users[i+1:]...)
+			delete(d.tokens, x.Token)
+			return d.flush()
+		}
+	}
+	return os.ErrNotExist
 }
 
 // ---- 全局设置 ----

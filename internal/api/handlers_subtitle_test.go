@@ -148,13 +148,14 @@ func TestRemux_Atrack(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 不可用，跳过选轨集成测试")
 	}
+	enc := requireH264Encoder(t)
 	mkv := filepath.Join(t.TempDir(), "a.mkv")
 	gen := exec.Command("ffmpeg", "-y", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=duration=2:size=320x180:rate=15",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=2",
 		"-f", "lavfi", "-i", "sine=frequency=880:duration=2",
 		"-map", "0:v", "-map", "1:a", "-map", "2:a",
-		"-c:v", "libopenh264", "-c:a", "aac", "-pix_fmt", "yuv420p", mkv)
+		"-c:v", enc, "-c:a", "aac", "-pix_fmt", "yuv420p", mkv)
 	if out, err := gen.CombinedOutput(); err != nil {
 		t.Fatalf("生成 mkv 失败: %v %s", err, out)
 	}

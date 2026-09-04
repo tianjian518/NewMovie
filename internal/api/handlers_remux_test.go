@@ -78,13 +78,14 @@ func TestRemux_StreamsMP4(t *testing.T) {
 		t.Skip("ffmpeg 不可用，跳过转封装集成测试")
 	}
 	_, st, get := newAuthedServerWithStore(t)
+	enc := requireH264Encoder(t)
 
 	// 1) 造一个 h264+aac 的 MKV（浏览器原生不认容器）。
 	mkv := filepath.Join(t.TempDir(), "sample.mkv")
 	gen := exec.Command("ffmpeg", "-y", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=duration=2:size=320x180:rate=15",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-		"-c:v", "libopenh264", "-c:a", "aac", "-pix_fmt", "yuv420p", mkv)
+		"-c:v", enc, "-c:a", "aac", "-pix_fmt", "yuv420p", mkv)
 	if out, err := gen.CombinedOutput(); err != nil {
 		t.Fatalf("生成 mkv 失败: %v (%s)", err, out)
 	}
