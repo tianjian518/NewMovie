@@ -160,14 +160,14 @@ export default function Detail() {
     <div>
       {/* Hero：背景图 + 标题浮层（Emby 风格） */}
       <div
-        className="relative h-64 rounded-xl mb-4 overflow-hidden bg-cover bg-center"
+        className="relative h-48 md:h-64 rounded-xl mb-4 overflow-hidden bg-cover bg-center"
         style={{ backgroundImage: item.backdrop_url ? `url("${item.backdrop_url}")` : undefined, background: "#171b22" }}
       >
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
-        <div className="absolute bottom-0 left-0 p-6">
-          <h1 className="text-3xl font-bold drop-shadow">
+        <div className="absolute bottom-0 left-0 p-4 md:p-6">
+          <h1 className="text-2xl md:text-3xl font-bold drop-shadow">
             {item.title}
-            {item.year > 0 && <span className="text-gray-300 text-xl"> ({item.year})</span>}
+            {item.year > 0 && <span className="text-gray-300 text-lg md:text-xl"> ({item.year})</span>}
           </h1>
           <div className="flex items-center gap-3 text-sm mt-2">
             {item.rating > 0 && <span className="text-yellow-400">★ {item.rating.toFixed(1)}</span>}
@@ -191,8 +191,8 @@ export default function Detail() {
           </div>
         </div>
       </div>
-      <div className="flex gap-6">
-        <div className="w-40 shrink-0 -mt-20 relative z-10"><PosterCard item={item} /></div>
+      <div className="flex gap-4 md:gap-6">
+        <div className="w-28 md:w-40 shrink-0 -mt-16 md:-mt-20 relative z-10"><PosterCard item={item} /></div>
         <div className="flex-1 pt-2">
           <p className="text-gray-300 mt-3 text-sm leading-relaxed">{item.overview || "暂无简介"}</p>
           {err && <p className="text-red-400 text-sm mt-2">{err}</p>}

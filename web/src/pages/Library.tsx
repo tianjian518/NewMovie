@@ -175,7 +175,7 @@ export default function Library() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {libs.map((l) => (
-          <div key={l.id} className="bg-card rounded-lg p-5 hover:ring-2 hover:ring-brand">
+          <div key={l.id} className="bg-card rounded-lg p-4 md:p-5 hover:ring-2 hover:ring-brand">
             <Link to={"/library/" + l.id} className="text-lg font-semibold block">{l.name}</Link>
             <div className="text-xs text-gray-400 mt-2 break-all">{modeLabel(l.mode)} · {l.root_path}</div>
             {isAdmin() && (

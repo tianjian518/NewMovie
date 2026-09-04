@@ -6,7 +6,7 @@ import type { Storage, PathRewrite } from "../types";
 export default function Settings() {
   const admin = isAdmin();
   return (
-    <div className="space-y-10">
+    <div className="space-y-6 md:space-y-10">
       <TranscodePanel />
       {admin && <TmdbPanel />}
       {admin && <StoragePanel />}

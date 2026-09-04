@@ -238,14 +238,14 @@ export default function Player() {
               <div className="flex items-center gap-2 justify-center">
                 <input
                   type="number" min={0} placeholder="分"
-                  className="bg-ink rounded px-2 py-1 text-sm w-20 border border-white/10"
+                  className="bg-ink rounded px-2 py-1 text-sm w-16 md:w-20 border border-white/10"
                   value={minuteStr}
                   onChange={(e) => setMinuteStr(e.target.value)}
                 />
                 <span className="text-gray-400 text-sm">:</span>
                 <input
                   type="number" min={0} max={59} placeholder="秒"
-                  className="bg-ink rounded px-2 py-1 text-sm w-20 border border-white/10"
+                  className="bg-ink rounded px-2 py-1 text-sm w-16 md:w-20 border border-white/10"
                   value={secondStr}
                   onChange={(e) => setSecondStr(e.target.value)}
                 />
@@ -262,7 +262,7 @@ export default function Player() {
       )}
 
       {dec.warn && (
-        <div className="mt-3 bg-amber-500/10 border border-amber-500/40 rounded-lg p-4 text-sm text-amber-200">
+        <div className="mt-3 bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 md:p-4 text-sm text-amber-200">
           <p className="font-medium mb-1">⚠️ 服务端缺少 ffmpeg</p>
           <p>{dec.warn}</p>
           <p className="mt-2 text-amber-200/80">
