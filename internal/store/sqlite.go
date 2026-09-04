@@ -584,21 +584,7 @@ func (s *sqliteStore) GetMediaItem(id string) (model.MediaItem, error) {
 // SearchMediaItems 是 SQLite 专有的高效搜索（Store 接口之外的扩展方法）。
 // 由 handlers 通过类型断言使用：JSON store 无此方法时退回线性扫描。
 func (s *sqliteStore) SearchMediaItems(q, kind, libID, sortBy string, offset, limit int) ([]model.MediaItem, error) {
-	where := []string{"1=1"}
-	args := []interface{}{}
-	if libID != "" {
-		where = append(where, "library_id=?")
-		args = append(args, libID)
-	}
-	if kind != "" {
-		where = append(where, "kind=?")
-		args = append(args, kind)
-	}
-	if q != "" {
-		where = append(where, "(title LIKE ? OR overview LIKE ?)")
-		like := "%" + strings.ToLower(q) + "%"
-		args = append(args, like, like)
-	}
+	where, args := buildSearchWhere(q, kind, libID)
 	order := "title"
 	switch sortBy {
 	case "year":
@@ -621,6 +607,35 @@ func (s *sqliteStore) SearchMediaItems(q, kind, libID, sortBy string, offset, li
 	}
 	defer rows.Close()
 	return scanItems(rows)
+}
+
+// CountMediaItems 返回符合搜索条件的条目总数（与 SearchMediaItems 共用过滤条件）。
+// 用于前端分页：知道 total 才能显示「共 N 条」和精确页码，而不是靠「最后一页不满」来猜。
+func (s *sqliteStore) CountMediaItems(q, kind, libID string) (int, error) {
+	where, args := buildSearchWhere(q, kind, libID)
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM media_items WHERE "+strings.Join(where, " AND "), args...).Scan(&n)
+	return n, err
+}
+
+// buildSearchWhere 构建搜索过滤条件（Search 与 Count 共用，保证两者口径一致）。
+func buildSearchWhere(q, kind, libID string) ([]string, []interface{}) {
+	where := []string{"1=1"}
+	args := []interface{}{}
+	if libID != "" {
+		where = append(where, "library_id=?")
+		args = append(args, libID)
+	}
+	if kind != "" {
+		where = append(where, "kind=?")
+		args = append(args, kind)
+	}
+	if q != "" {
+		where = append(where, "(title LIKE ? OR overview LIKE ?)")
+		like := "%" + strings.ToLower(q) + "%"
+		args = append(args, like, like)
+	}
+	return where, args
 }
 
 func scanItems(rows *sql.Rows) ([]model.MediaItem, error) {

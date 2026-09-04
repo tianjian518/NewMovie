@@ -151,7 +151,7 @@ function Dashboard() {
     setLoading(true);
     Promise.all([
       api.listContinue().then(setCont).catch(() => {}),
-      api.search({ sort: "recent", limit: 18 }).then(setRecent).catch(() => {}),
+      api.search({ sort: "recent", limit: 18 }).then((r) => setRecent(r.items)).catch(() => {}),
       api.listLibraries().then(setLibs).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, []);
@@ -163,7 +163,7 @@ function Dashboard() {
     Promise.all(
       libs.map((l) =>
         api.search({ library: l.id, sort: "recent", limit: 12 })
-          .then((items) => [l.id, items] as const)
+          .then((r) => [l.id, r.items] as const)
           .catch(() => [l.id, [] as MediaItem[]] as const),
       ),
     ).then((pairs) => {
@@ -278,6 +278,7 @@ function LibraryItems() {
   // 底部放一个「哨兵」div，用 IntersectionObserver 观测它进入视口即触发 loadMore。
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [total, setTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const lockRef = useRef(false); // 防重复触发 loadMore（并发保护）
@@ -295,9 +296,12 @@ function LibraryItems() {
     setErr("");
     const off = reset ? 0 : page * PAGE;
     api.search({ q, kind, library: id, sort: sortBy, limit: PAGE, offset: off })
-      .then((list) => {
-        setItems((prev) => (reset ? list : [...prev, ...list]));
-        setHasMore(list.length === PAGE); // 少于 PAGE 说明到底了
+      .then((r) => {
+        setItems((prev) => (reset ? r.items : [...prev, ...r.items]));
+        setTotal(r.total);
+        // 用后端返回的 total 精确判断是否还有下一页，而不是靠「本页是否满」猜——
+        // 最后一页正好满 PAGE 条时，旧逻辑会多打一次空请求。
+        setHasMore(off + r.items.length < r.total);
         if (reset) setPage(1); else setPage((p) => p + 1);
       })
       .catch((e) => setErr(e?.message || "加载失败"));
@@ -418,7 +422,7 @@ function LibraryItems() {
         </p>
       ) : (
         <>
-          <div className="text-xs text-gray-500 mb-2">共 {items.length} 个条目</div>
+          <div className="text-xs text-gray-500 mb-2">共 {total} 个条目{total > items.length ? `（已加载 ${items.length}）` : ""}</div>
           <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-4">
             {items.map((it) => (
               <Link key={it.id} to={"/item/" + it.id}><PosterCard item={it} /></Link>
@@ -432,7 +436,7 @@ function LibraryItems() {
           ) : (
             items.length > PAGE && (
               <div className="py-6 text-center text-xs text-gray-500">
-                已全部加载 · 共 {items.length} 个条目
+                已全部加载 · 共 {total} 个条目
               </div>
             )
           )}

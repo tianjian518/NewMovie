@@ -58,13 +58,22 @@ func featureFixture(t *testing.T) (store.Store, func(method, path, body string) 
 func TestSearch_QueryKindSort(t *testing.T) {
 	_, do := featureFixture(t)
 
-	titles := func(body string) []string {
-		var items []model.MediaItem
-		if err := json.Unmarshal([]byte(body), &items); err != nil {
+	// 搜索 API 返回 {items, total}，parse 提取完整响应。
+	type searchResp struct {
+		Items []model.MediaItem `json:"items"`
+		Total int               `json:"total"`
+	}
+	parse := func(body string) searchResp {
+		var resp searchResp
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
 			t.Fatalf("解析响应: %v (%s)", err, body)
 		}
-		out := make([]string, len(items))
-		for i, it := range items {
+		return resp
+	}
+	titles := func(body string) []string {
+		resp := parse(body)
+		out := make([]string, len(resp.Items))
+		for i, it := range resp.Items {
 			out[i] = it.Title
 		}
 		return out
@@ -78,11 +87,17 @@ func TestSearch_QueryKindSort(t *testing.T) {
 	if got := titles(body); len(got) != 3 {
 		t.Fatalf("全量条目数 = %d, want 3: %v", len(got), got)
 	}
+	if got := parse(body).Total; got != 3 {
+		t.Fatalf("全量 total = %d, want 3", got)
+	}
 
 	// 关键词命中标题
 	_, body = do(http.MethodGet, "/api/search?q=沙丘", "")
 	if got := titles(body); len(got) != 1 || got[0] != "沙丘" {
 		t.Fatalf("按标题搜索 = %v", got)
+	}
+	if got := parse(body).Total; got != 1 {
+		t.Fatalf("按标题搜索 total = %d, want 1", got)
 	}
 	// 关键词命中简介
 	_, body = do(http.MethodGet, "/api/search?q=潘多拉", "")
@@ -113,6 +128,12 @@ func TestSearch_QueryKindSort(t *testing.T) {
 	_, body = do(http.MethodGet, "/api/search?sort=recent", "")
 	if got := titles(body); got[0] != "阿凡达" {
 		t.Fatalf("按最近添加首项 = %v, want 阿凡达", got)
+	}
+
+	// limit 上限保护：传超大 limit 不应报错，应被钳到 maxLimit
+	_, body = do(http.MethodGet, "/api/search?limit=999999", "")
+	if got := parse(body); got.Total != 3 || len(got.Items) != 3 {
+		t.Fatalf("超大 limit 应被钳制且正常返回: total=%d items=%d", got.Total, len(got.Items))
 	}
 }
 

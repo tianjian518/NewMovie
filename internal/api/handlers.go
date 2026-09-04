@@ -852,9 +852,10 @@ func (s *Server) handleItems(w http.ResponseWriter, r *http.Request, parts []str
 	}
 }
 
-// searchItems 全局搜索 + 筛选 + 排序：GET /api/search?q=&kind=&library=&sort=
+// searchItems 全局搜索 + 筛选 + 排序：GET /api/search?q=&kind=&library=&sort=&limit=&offset=
 //
-// 库大了以后海报墙就是一面砖墙，没有搜索根本找不到东西。
+// 返回 {items: [...], total: N}，前端据此做分页与「共 N 条」展示。
+// limit 上限 500，防止恶意请求一次性拉全库。
 // sort 支持 title / year / rating / recent，默认按标题。
 func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -878,21 +879,39 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 			offset = n
 		}
 	}
+	// limit 上限保护：一次性拉全库既浪费带宽又可能把弱设备拖垮。
+	const maxLimit = 500
+	if lim == 0 || lim > maxLimit {
+		lim = maxLimit
+	}
 
-	// SQLite 存储：搜索下沉到 SQL（LIKE + 索引 + LIMIT），避免全库线性扫描。
-	// JSON store 无此能力时回退到下方线性扫描，行为一致。
+	// SQLite 存储：搜索 + 计数都下沉到 SQL，避免全库线性扫描。
 	if searcher, ok := s.Store.(interface {
 		SearchMediaItems(q, kind, libID, sortBy string, offset, limit int) ([]model.MediaItem, error)
+		CountMediaItems(q, kind, libID string) (int, error)
 	}); ok {
 		items, err := searcher.SearchMediaItems(q, kind, libFilter, sortBy, offset, lim)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "搜索失败")
 			return
 		}
-		writeJSON(w, s.filterItemsForUser(u, items))
+		total, err := searcher.CountMediaItems(q, kind, libFilter)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "计数失败")
+			return
+		}
+		filtered := s.filterItemsForUser(u, items)
+		// 非管理员有库白名单/儿童模式过滤时，total 也需要按过滤后口径重算。
+		// 保守做法：过滤后数量少于本页 limit 时 total 取 offset+len(filtered)，
+		// 足够前端判断「是否还有下一页」；管理员无过滤则 total 精确。
+		if !u.IsAdmin && total > offset+len(filtered) {
+			total = offset + len(filtered)
+		}
+		writeJSON(w, map[string]interface{}{"items": filtered, "total": total})
 		return
 	}
 
+	// JSON store 回退：全量过滤排序后再分页
 	libs, _ := s.Store.ListLibraries()
 	out := []model.MediaItem{}
 	for _, lib := range libs {
@@ -929,13 +948,14 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Title < out[j].Title
 	})
+	total := len(out)
 	if offset > 0 && offset < len(out) {
 		out = out[offset:]
 	}
 	if lim > 0 && lim < len(out) {
 		out = out[:lim]
 	}
-	writeJSON(w, out)
+	writeJSON(w, map[string]interface{}{"items": out, "total": total})
 }
 
 // matchItem 手动把条目绑定到指定 TMDB ID 并立即重刮削：

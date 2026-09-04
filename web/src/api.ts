@@ -114,10 +114,11 @@ export const api = {
   },
 
   // 全局搜索 / 筛选 / 排序（支持 offset 分页，供海报墙虚拟滚动按页拉取）
+  // 返回 {items, total}，total 为符合条件的条目总数（用于分页 UI）。
   search: (p: { q?: string; kind?: string; library?: string; sort?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     Object.entries(p).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") qs.set(k, String(v)); });
-    return req<MediaItem[]>("/api/search?" + qs.toString());
+    return req<{ items: MediaItem[]; total: number }>("/api/search?" + qs.toString());
   },
 
   saveRecord: (fileId: string, position: number, duration: number) =>
