@@ -775,6 +775,11 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 // --- 扫描 ---
 
 func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string) {
+	cur, _ := s.requireUser(r)
+	if !cur.IsAdmin {
+		writeErr(w, http.StatusForbidden, "仅管理员可触发扫描")
+		return
+	}
 	lib, err := s.Store.GetLibrary(libID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "媒体库不存在")

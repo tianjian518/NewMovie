@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route, Link, NavLink, useNavigate, useParams } from "react-router-dom";
-import { api, getToken, setToken, clearToken, setAdmin } from "./api";
+import { api, getToken, setToken, clearToken, setAdmin, isAdmin } from "./api";
 import type { MediaItem, ScanJob, ContinueRow, FavoriteRow, Library as LibraryType } from "./types";
 import Library from "./pages/Library";
 import Detail from "./pages/Detail";
@@ -396,13 +396,15 @@ function LibraryItems() {
         <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="bg-card rounded px-2 py-1 text-sm border border-white/10">
           {SORTS.map((s) => <option key={s.v} value={s.v}>按{s.label}</option>)}
         </select>
-        <button
-          onClick={scan}
-          disabled={scanning}
-          className="bg-brand rounded px-3 py-1 text-sm disabled:opacity-50"
-        >
-          {scanning ? "扫描中…" : "扫描导入"}
-        </button>
+        {isAdmin() && (
+          <button
+            onClick={scan}
+            disabled={scanning}
+            className="bg-brand rounded px-3 py-1 text-sm disabled:opacity-50"
+          >
+            {scanning ? "扫描中…" : "扫描导入"}
+          </button>
+        )}
       </div>
       {job && job.status === "running" && (
         <div className="text-sm text-gray-400 mb-3">
