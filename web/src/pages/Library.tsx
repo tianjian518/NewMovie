@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, isAdmin } from "../api";
 import DirPicker, { stripJson } from "../components/DirPicker";
 import type { Library, Storage } from "../types";
 
@@ -85,9 +85,11 @@ export default function Library() {
       )}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold">媒体库</h2>
-        <button onClick={() => setShowForm((v) => !v)} className="bg-brand rounded px-3 py-1 text-sm">
-          {showForm ? "收起" : "创建媒体库"}
-        </button>
+        {isAdmin() && (
+          <button onClick={() => setShowForm((v) => !v)} className="bg-brand rounded px-3 py-1 text-sm">
+            {showForm ? "收起" : "创建媒体库"}
+          </button>
+        )}
       </div>
 
       {showForm && (
@@ -176,7 +178,9 @@ export default function Library() {
           <div key={l.id} className="bg-card rounded-lg p-5 hover:ring-2 hover:ring-brand">
             <Link to={"/library/" + l.id} className="text-lg font-semibold block">{l.name}</Link>
             <div className="text-xs text-gray-400 mt-2 break-all">{modeLabel(l.mode)} · {l.root_path}</div>
-            <button onClick={() => del(l.id)} className="text-red-400 hover:text-red-300 text-xs mt-3">删除</button>
+            {isAdmin() && (
+              <button onClick={() => del(l.id)} className="text-red-400 hover:text-red-300 text-xs mt-3">删除</button>
+            )}
           </div>
         ))}
         {libs.length === 0 && !showForm && (
