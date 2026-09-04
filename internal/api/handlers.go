@@ -456,12 +456,31 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 // --- 存储源 ---
 
+// sanitizeStorage 对普通用户脱敏存储源的敏感字段（Token / SignKey）。
+// 建库时前端只需要 id/name/base_url/type，不需要也不应该拿到网盘 API 凭证。
+func sanitizeStorage(s model.Storage) model.Storage {
+	s.Token = ""
+	s.SignKey = ""
+	return s
+}
+
 func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request, parts []string) {
+	cur, _ := s.requireUser(r)
 	switch {
 	case len(parts) == 2 && r.Method == http.MethodGet:
 		list, _ := s.Store.ListStorages()
+		// 普通用户只能看到脱敏后的存储源（用于建库时选择），管理员看到完整信息。
+		if !cur.IsAdmin {
+			for i := range list {
+				list[i] = sanitizeStorage(list[i])
+			}
+		}
 		writeJSON(w, list)
 	case len(parts) == 2 && r.Method == http.MethodPost:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可创建存储源")
+			return
+		}
 		var st model.Storage
 		if err := readJSON(r, &st); err != nil {
 			writeErr(w, http.StatusBadRequest, "请求体错误")
@@ -483,6 +502,10 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request, parts []
 		_ = s.Store.SaveStorage(st)
 		writeJSON(w, st)
 	case len(parts) == 3 && r.Method == http.MethodPut:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可修改存储源")
+			return
+		}
 		// 编辑已有存储源：按 ID 更新。
 		var st model.Storage
 		if err := readJSON(r, &st); err != nil {
@@ -500,15 +523,27 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request, parts []
 		_ = s.Store.SaveStorage(st)
 		writeJSON(w, st)
 	case len(parts) == 3 && r.Method == http.MethodDelete:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可删除存储源")
+			return
+		}
 		if err := s.Store.DeleteStorage(parts[2]); err != nil {
 			writeErr(w, http.StatusNotFound, "存储源不存在")
 			return
 		}
 		writeJSON(w, map[string]interface{}{"ok": true})
 	case len(parts) == 3 && parts[2] == "test" && r.Method == http.MethodPost:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可测试存储源连接")
+			return
+		}
 		s.testStorage(w, r)
-	case len(parts) == 4 && parts[2] == "drives" && r.Method == http.MethodGet:
-		st, err := s.Store.GetStorage(parts[3])
+	case len(parts) == 4 && parts[3] == "drives" && r.Method == http.MethodGet:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可列出存储源驱动器")
+			return
+		}
+		st, err := s.Store.GetStorage(parts[2])
 		if err != nil {
 			writeErr(w, http.StatusNotFound, "存储源不存在")
 			return
@@ -520,6 +555,10 @@ func (s *Server) handleStorages(w http.ResponseWriter, r *http.Request, parts []
 		}
 		writeJSON(w, drives)
 	case len(parts) == 4 && parts[3] == "browse" && r.Method == http.MethodGet:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可浏览存储源目录")
+			return
+		}
 		s.browseStorage(w, r, parts[2])
 	default:
 		writeErr(w, http.StatusNotFound, "unknown storages route")
@@ -675,6 +714,11 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 		}
 		writeJSON(w, list)
 	case len(parts) == 2 && r.Method == http.MethodPost:
+		cur, _ := s.requireUser(r)
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可创建媒体库")
+			return
+		}
 		var lib model.Library
 		if err := readJSON(r, &lib); err != nil {
 			writeErr(w, http.StatusBadRequest, "请求体错误")
@@ -690,6 +734,11 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 		_ = s.Store.SaveLibrary(lib)
 		writeJSON(w, lib)
 	case len(parts) == 3 && r.Method == http.MethodDelete:
+		cur, _ := s.requireUser(r)
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可删除媒体库")
+			return
+		}
 		if err := s.Store.DeleteLibrary(parts[2]); err != nil {
 			writeErr(w, http.StatusNotFound, "媒体库不存在")
 			return
@@ -1251,6 +1300,11 @@ func (s *Server) handleRewrites(w http.ResponseWriter, r *http.Request, parts []
 		list, _ := s.Store.ListPathRewrites()
 		writeJSON(w, list)
 	case len(parts) == 2 && r.Method == http.MethodPost:
+		cur, _ := s.requireUser(r)
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可创建路径重写")
+			return
+		}
 		var rw model.PathRewrite
 		if err := readJSON(r, &rw); err != nil {
 			writeErr(w, http.StatusBadRequest, "请求体错误")
@@ -1267,14 +1321,32 @@ func (s *Server) handleRewrites(w http.ResponseWriter, r *http.Request, parts []
 	}
 }
 
+// sensitiveSettings 普通用户不应看到的设置 key（含 API Key / 密钥等）。
+var sensitiveSettings = map[string]bool{
+	"tmdb_api_key": true,
+}
+
 // handleSettings 读写全局设置（如用户自填的 TMDB Key）。
 // GET 返回全部；PUT/POST 接收 {key:value} 增量保存。
+// 普通用户 GET 时敏感 key 会被脱敏（返回空串），写操作仅管理员。
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	cur, _ := s.requireUser(r)
 	switch r.Method {
 	case http.MethodGet:
 		list, _ := s.Store.ListSettings()
+		if !cur.IsAdmin {
+			for k := range list {
+				if sensitiveSettings[k] {
+					list[k] = ""
+				}
+			}
+		}
 		writeJSON(w, list)
 	case http.MethodPut, http.MethodPost:
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可修改全局设置")
+			return
+		}
 		var body map[string]string
 		if err := readJSON(r, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, "请求体错误")

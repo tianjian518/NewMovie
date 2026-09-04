@@ -261,3 +261,126 @@ func TestMatchItem_RequiresTMDBKey(t *testing.T) {
 		t.Fatalf("不存在条目 code = %d, want 404", code)
 	}
 }
+
+// nonAdminFixture 建一个带普通用户（非管理员）的测试服务端，用于权限越权测试。
+func nonAdminFixture(t *testing.T) (store.Store, func(method, path, body string) (int, string)) {
+	t.Helper()
+	t.Setenv("VIDRIVE_HLS", "0")
+	st, err := store.NewJSONStore(t.TempDir() + "/v.json")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	// 普通用户：IsAdmin=false，无库白名单限制（CanAccess 空=全放行）
+	u := model.User{ID: "u2", Username: "viewer", Password: auth.HashPassword("viewer"), IsAdmin: false}
+	_ = st.SaveUser(u)
+	_ = st.UpsertToken(u.ID, "vtok")
+	_ = st.SaveLibrary(model.Library{ID: "lib1", Name: "电影库"})
+	_ = st.SaveStorage(model.Storage{ID: "st1", Name: "测试存储", Type: model.StorageOpenList, BaseURL: "http://ol:5244", Token: "secret-token", SignKey: "secret-sign"})
+	cfg := &config.Config{DataDir: t.TempDir(), CacheDir: t.TempDir() + "/cache"}
+	ts := httptest.NewServer(New(st, cfg).Handler())
+	t.Cleanup(ts.Close)
+	do := func(method, path, body string) (int, string) {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, rd)
+		req.Header.Set("Authorization", "Bearer vtok")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("req %s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	return st, do
+}
+
+// TestNonAdmin_CannotMutateStorages 普通用户不能增删改存储源，也不能浏览目录/测试连接/列驱动器。
+// 修复前这些接口完全没有管理员检查，普通用户可直接操作含 API Key 的存储源。
+func TestNonAdmin_CannotMutateStorages(t *testing.T) {
+	_, do := nonAdminFixture(t)
+
+	// GET 列表可以，但 Token/SignKey 必须被脱敏
+	code, body := do(http.MethodGet, "/api/storages", "")
+	if code != http.StatusOK {
+		t.Fatalf("列存储源 code = %d", code)
+	}
+	if strings.Contains(body, "secret-token") || strings.Contains(body, "secret-sign") {
+		t.Fatalf("普通用户看到了存储源敏感字段: %s", body)
+	}
+	// POST 创建 → 403
+	if code, _ := do(http.MethodPost, "/api/storages", `{"name":"x","base_url":"http://x"}`); code != http.StatusForbidden {
+		t.Fatalf("普通用户创建存储源 code = %d, want 403", code)
+	}
+	// PUT 修改 → 403
+	if code, _ := do(http.MethodPut, "/api/storages/st1", `{"name":"x"}`); code != http.StatusForbidden {
+		t.Fatalf("普通用户修改存储源 code = %d, want 403", code)
+	}
+	// DELETE 删除 → 403
+	if code, _ := do(http.MethodDelete, "/api/storages/st1", ""); code != http.StatusForbidden {
+		t.Fatalf("普通用户删除存储源 code = %d, want 403", code)
+	}
+	// 测试连接 → 403
+	if code, _ := do(http.MethodPost, "/api/storages/test", `{}`); code != http.StatusForbidden {
+		t.Fatalf("普通用户测试存储源 code = %d, want 403", code)
+	}
+	// 列驱动器 → 403
+	if code, _ := do(http.MethodGet, "/api/storages/st1/drives", ""); code != http.StatusForbidden {
+		t.Fatalf("普通用户列驱动器 code = %d, want 403", code)
+	}
+	// 浏览目录 → 403
+	if code, _ := do(http.MethodGet, "/api/storages/st1/browse?path=/", ""); code != http.StatusForbidden {
+		t.Fatalf("普通用户浏览目录 code = %d, want 403", code)
+	}
+}
+
+// TestNonAdmin_CannotMutateLibraries 普通用户不能创建/删除媒体库。
+func TestNonAdmin_CannotMutateLibraries(t *testing.T) {
+	_, do := nonAdminFixture(t)
+
+	// GET 列表可以（已有权限过滤）
+	if code, _ := do(http.MethodGet, "/api/libraries", ""); code != http.StatusOK {
+		t.Fatalf("列媒体库 code = %d", code)
+	}
+	// POST 创建 → 403
+	if code, _ := do(http.MethodPost, "/api/libraries", `{"name":"新库","mode":"native"}`); code != http.StatusForbidden {
+		t.Fatalf("普通用户创建媒体库 code = %d, want 403", code)
+	}
+	// DELETE 删除 → 403
+	if code, _ := do(http.MethodDelete, "/api/libraries/lib1", ""); code != http.StatusForbidden {
+		t.Fatalf("普通用户删除媒体库 code = %d, want 403", code)
+	}
+}
+
+// TestNonAdmin_CannotMutateSettings 普通用户不能修改全局设置，GET 时敏感 key 被脱敏。
+func TestNonAdmin_CannotMutateSettings(t *testing.T) {
+	st, do := nonAdminFixture(t)
+	_ = st.SaveSetting("tmdb_api_key", "real-tmdb-key-123")
+	_ = st.SaveSetting("some_public_setting", "visible-value")
+
+	// GET 可以，但 tmdb_api_key 必须被脱敏
+	code, body := do(http.MethodGet, "/api/settings", "")
+	if code != http.StatusOK {
+		t.Fatalf("列设置 code = %d", code)
+	}
+	if strings.Contains(body, "real-tmdb-key-123") {
+		t.Fatalf("普通用户看到了 TMDB API Key: %s", body)
+	}
+	if !strings.Contains(body, "visible-value") {
+		t.Fatalf("普通用户看不到非敏感设置: %s", body)
+	}
+	// PUT 修改 → 403
+	if code, _ := do(http.MethodPut, "/api/settings", `{"tmdb_api_key":"hacked"}`); code != http.StatusForbidden {
+		t.Fatalf("普通用户修改设置 code = %d, want 403", code)
+	}
+}
+
+// TestNonAdmin_CannotCreateRewrite 普通用户不能创建路径重写。
+func TestNonAdmin_CannotCreateRewrite(t *testing.T) {
+	_, do := nonAdminFixture(t)
+	if code, _ := do(http.MethodPost, "/api/rewrites", `{"from":"/a","to":"/b"}`); code != http.StatusForbidden {
+		t.Fatalf("普通用户创建路径重写 code = %d, want 403", code)
+	}
+}
