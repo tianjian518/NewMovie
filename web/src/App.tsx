@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route, Link, NavLink, useNavigate, useParams } from "react-router-dom";
-import { api, getToken, setToken, clearToken } from "./api";
+import { api, getToken, setToken, clearToken, setAdmin } from "./api";
 import type { MediaItem, ScanJob, ContinueRow, FavoriteRow, Library as LibraryType } from "./types";
 import Library from "./pages/Library";
 import Detail from "./pages/Detail";
@@ -26,6 +26,7 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
     try {
       const r = await api.login(u, p);
       if (!r?.token) throw new Error("服务端未返回 token");
+      setAdmin(r.is_admin); // 保存管理员角色，前端据此隐藏管理员功能 UI
       onLogin(r.token);
     } catch (e: any) {
       setErr(e?.message || "登录失败，请检查用户名和密码");

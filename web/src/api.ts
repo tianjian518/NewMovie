@@ -5,6 +5,7 @@ import type {
 } from "./types";
 
 const TOKEN_KEY = "vidrive_token";
+const ADMIN_KEY = "vidrive_is_admin";
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) || "";
@@ -14,6 +15,19 @@ export function setToken(t: string) {
 }
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(ADMIN_KEY);
+}
+// isAdmin 持久化：login 时后端返回 is_admin，存 localStorage 供前端做 UI 权限控制。
+// 注意这只是 UI 层隐藏，真正的权限校验在后端（写操作限管理员）。
+export function isAdmin(): boolean {
+  return localStorage.getItem(ADMIN_KEY) === "1";
+}
+export function setAdmin(v: boolean) {
+  if (v) {
+    localStorage.setItem(ADMIN_KEY, "1");
+  } else {
+    localStorage.removeItem(ADMIN_KEY);
+  }
 }
 
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {

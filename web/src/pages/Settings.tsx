@@ -1,16 +1,22 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, isAdmin } from "../api";
 import type { Storage, PathRewrite } from "../types";
 
 // 设置页：绑定 OpenList 存储源（含连通性测试）、管理 strm 路径重写规则、填 TMDB Key。
 export default function Settings() {
+  const admin = isAdmin();
   return (
     <div className="space-y-10">
-      <TmdbPanel />
       <TranscodePanel />
-      <StoragePanel />
-      <RewritePanel />
-      <StrmTips />
+      {admin && <TmdbPanel />}
+      {admin && <StoragePanel />}
+      {admin && <RewritePanel />}
+      {admin && <StrmTips />}
+      {!admin && (
+        <p className="text-sm text-gray-500">
+          存储源管理、路径重写、TMDB Key 等设置仅管理员可见。
+        </p>
+      )}
     </div>
   );
 }
