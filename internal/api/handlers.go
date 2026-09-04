@@ -1371,7 +1371,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 // 让用户在扫描前就能确认「Key 有效 + 网络可达」，而不是扫完发现全是灰底占位图。
 //
 // 请求体可选：{"api_key":"...","api_base":"..."}；缺省则用已保存的配置。
+// 仅管理员：会消耗 TMDB API 配额，且能探测已配置 Key 的有效性。
 func (s *Server) testTMDB(w http.ResponseWriter, r *http.Request) {
+	cur, _ := s.requireUser(r)
+	if !cur.IsAdmin {
+		writeErr(w, http.StatusForbidden, "仅管理员可测试 TMDB 连接")
+		return
+	}
 	var body struct {
 		APIKey  string `json:"api_key"`
 		APIBase string `json:"api_base"`
