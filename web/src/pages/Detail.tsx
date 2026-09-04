@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { api } from "../api";
+import { api, isAdmin } from "../api";
 import type { MediaItem, MediaFile } from "../types";
 import PosterCard from "../components/PosterCard";
 
@@ -197,14 +197,18 @@ export default function Detail() {
           <p className="text-gray-300 mt-3 text-sm leading-relaxed">{item.overview || "暂无简介"}</p>
           {err && <p className="text-red-400 text-sm mt-2">{err}</p>}
           <div className="flex flex-wrap gap-2 mt-3">
-            <button disabled={busy} onClick={rescrape}
-              className="bg-card border border-white/10 rounded px-3 py-1 text-sm disabled:opacity-60">
-              重新刮削
-            </button>
-            <button disabled={busy} onClick={() => setShowMatch(true)}
-              className="bg-card border border-white/10 rounded px-3 py-1 text-sm disabled:opacity-60">
-              匹配错了？手动指定
-            </button>
+            {isAdmin() && (
+              <>
+                <button disabled={busy} onClick={rescrape}
+                  className="bg-card border border-white/10 rounded px-3 py-1 text-sm disabled:opacity-60">
+                  重新刮削
+                </button>
+                <button disabled={busy} onClick={() => setShowMatch(true)}
+                  className="bg-card border border-white/10 rounded px-3 py-1 text-sm disabled:opacity-60">
+                  匹配错了？手动指定
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>

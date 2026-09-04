@@ -1012,7 +1012,13 @@ func (s *Server) searchItems(w http.ResponseWriter, r *http.Request) {
 //
 // 自动匹配再准也有认错的时候（同名翻拍、中文译名不一致、系列续作），
 // 之前只能去网盘目录里手写 .vidrive.json 才能纠正 —— 对普通用户等于没救。
+// 仅管理员：会修改全局条目的元数据。
 func (s *Server) matchItem(w http.ResponseWriter, r *http.Request, id string) {
+	cur, _ := s.requireUser(r)
+	if !cur.IsAdmin {
+		writeErr(w, http.StatusForbidden, "仅管理员可手动匹配")
+		return
+	}
 	item, err := s.Store.GetMediaItem(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "条目不存在")
@@ -2716,7 +2722,13 @@ func parseRange(spec string, total int) (start, end int, res rangeResult) {
 }
 
 // rescrapeItem 手动重刮削单个条目（例如初次扫描时还没配 TMDB Key，补配后重跑）。
+// 仅管理员：刮削会修改全局条目的元数据（海报/简介/评分），普通用户不应能改。
 func (s *Server) rescrapeItem(w http.ResponseWriter, r *http.Request, id string) {
+	cur, _ := s.requireUser(r)
+	if !cur.IsAdmin {
+		writeErr(w, http.StatusForbidden, "仅管理员可重新刮削")
+		return
+	}
 	item, err := s.Store.GetMediaItem(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "条目不存在")
