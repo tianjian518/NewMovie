@@ -291,3 +291,39 @@ func TestSQLite_SearchPagination(t *testing.T) {
 		t.Fatalf("page4 = %d, want 0", len(page4))
 	}
 }
+
+// TestSQLite_UpsertEmptyID 回归：按标题命中时，若新条目 ID 为空，不得清空已有条目的主键。
+// 旧代码无条件 old.ID = m.ID，会把已有条目 ID 抹成空串，后续按 ID 查找全部落空。
+func TestSQLite_UpsertEmptyID(t *testing.T) {
+	st := newSQLite(t)
+	const oldID = "m-old-hash"
+	// 先存一条带旧 ID 的条目（模拟旧库按文件名 hash 生成的 ID）
+	if err := st.SaveMediaItem(model.MediaItem{
+		ID: oldID, LibraryID: "lib", Title: "将夜", Year: 2026, Kind: model.KindSeries,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 用空 ID + 同标题同年份 upsert（模拟某调用方未生成 ID）
+	if err := st.UpsertMediaItemByTitle(model.MediaItem{
+		ID: "", LibraryID: "lib", Title: "将夜", Year: 2026, Kind: model.KindSeries,
+		Overview: "新简介",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 旧 ID 必须还在
+	got, err := st.GetMediaItem(oldID)
+	if err != nil {
+		t.Fatalf("旧 ID 应仍可查询: %v", err)
+	}
+	if got.Overview != "新简介" {
+		t.Fatalf("元数据应合并: Overview=%q", got.Overview)
+	}
+	// 全库只有一条
+	items, _ := st.ListMediaItems("lib")
+	if len(items) != 1 {
+		t.Fatalf("条目数 = %d, want 1", len(items))
+	}
+	if items[0].ID != oldID {
+		t.Fatalf("条目 ID = %q, want %q（不应被空串覆盖）", items[0].ID, oldID)
+	}
+}

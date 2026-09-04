@@ -509,8 +509,11 @@ func (s *sqliteStore) UpsertMediaItemByTitle(m model.MediaItem) error {
 			&old.BackdropPath, &old.BackdropStorageID, &old.CreatedAt)
 	if err == nil {
 		old.Kind = model.MediaKind(kind)
-		// 命中：保留既有 ID，合并更完整元数据
-		old.ID = m.ID // 若 m.ID 非空则更新为稳定 ID
+		// 命中：保留既有 ID，仅当新条目带了非空 ID 才迁移（旧库的文件名 hash ID → 剧名+年份 ID）。
+		// 若 m.ID 为空则绝不动 old.ID——否则会把已有条目的主键清空，导致后续按 ID 查找全部落空。
+		if m.ID != "" {
+			old.ID = m.ID
+		}
 		return s.SaveMediaItem(mergeItem(old, m))
 	}
 	// 3) 插入新条目
