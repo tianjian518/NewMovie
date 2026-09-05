@@ -1530,6 +1530,17 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 		if rg := r.Header.Get("Range"); rg != "" {
 			req.Header.Set("Range", rg)
 		}
+		// 透传源站所需 headers（如 WebDAV Basic Auth）。h 参数是 base64 编码的 JSON map。
+		if h := r.URL.Query().Get("h"); h != "" {
+			if decoded, err := base64.RawURLEncoding.DecodeString(h); err == nil {
+				var hdrs map[string]string
+				if json.Unmarshal(decoded, &hdrs) == nil {
+					for k, v := range hdrs {
+						req.Header.Set(k, v)
+					}
+				}
+			}
+		}
 		resp, err := s.proxyClientFor(target).Do(req)
 		if err != nil {
 			if errors.Is(err, errBlockedTarget) {
@@ -2464,7 +2475,14 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 	// 但 r.URL.Query().Get() 解码后 url.Parse 又把 + 当空格，导致 CDN 参数错乱）。
 	proxyURL := ""
 	if src := playback.PickURL(in); src != "" {
-		proxyURL = appendToken("/api/play/proxy?u="+base64.RawURLEncoding.EncodeToString([]byte(src)), getToken(r))
+		proxyURL = "/api/play/proxy?u=" + base64.RawURLEncoding.EncodeToString([]byte(src))
+		// headers（如 WebDAV Basic Auth）一并 base64 编码传递，反代端点透传到源站。
+		if len(headers) > 0 {
+			if hb, err := json.Marshal(headers); err == nil {
+				proxyURL += "&h=" + base64.RawURLEncoding.EncodeToString(hb)
+			}
+		}
+		proxyURL = appendToken(proxyURL, getToken(r))
 	}
 
 	writeJSON(w, map[string]interface{}{

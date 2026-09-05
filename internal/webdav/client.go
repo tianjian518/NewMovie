@@ -161,15 +161,22 @@ func (c *Client) List(p string, refresh bool) ([]openlist.FsObj, error) {
 }
 
 // GetLink 返回 WebDAV 直链（raw_url 即服务端 URL）。
+// 关键：WebDAV 通常需要 Basic Auth，浏览器直接访问直链会 401。
+// 把 Authorization header 放进响应，播放时经 /api/play/proxy 反代带上鉴权，
+// 或前端用 fetch + headers 取流。这是 WebDAV 存储能页内播放的前提。
 func (c *Client) GetLink(p string, refresh bool) (*openlist.FsGetResp, error) {
 	u := c.abs(p)
+	headers := map[string]string{}
+	if a := c.auth(); a != "" {
+		headers["Authorization"] = a
+	}
 	return &openlist.FsGetResp{
 		Data: struct {
 			RawURL  string            `json:"raw_url"`
 			URL     string            `json:"url"`
 			Sign    string            `json:"sign"`
 			Headers map[string]string `json:"headers"`
-		}{RawURL: u, URL: u},
+		}{RawURL: u, URL: u, Headers: headers},
 	}, nil
 }
 
