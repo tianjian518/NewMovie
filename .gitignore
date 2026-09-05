@@ -23,3 +23,5 @@
 test-data/
 newmovie-server
 server.log
+newmovie-server
+newmovie-server-*
