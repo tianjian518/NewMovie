@@ -12,7 +12,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -163,15 +163,22 @@ func NewSQLiteStore(path string) (Store, error) {
 	// - synchronous=NORMAL：WAL 模式下的最佳平衡，性能好且不会损坏
 	// - temp_store=MEMORY：临时表放内存，减少磁盘 I/O
 	// - 单连接：SQLite 单写者模型，避免并发写锁
+	// WAL 模式在某些文件系统（网络盘/特殊挂载）上可能不支持，失败则回退到默认 DELETE 模式。
+	// busy_timeout 是必须的（避免 database is locked），其他配置失败只警告不中断启动。
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		log.Printf("[store] 警告：启用 WAL 模式失败（%v），使用默认 DELETE 模式", err)
+	} else {
+		// WAL 模式下才设置 synchronous=NORMAL（DELETE 模式下用 FULL 更安全）
+		if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+			log.Printf("[store] 警告：设置 synchronous=NORMAL 失败：%v", err)
+		}
+	}
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA synchronous=NORMAL",
 		"PRAGMA temp_store=MEMORY",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("设置 %s 失败: %w", pragma, err)
+			log.Printf("[store] 警告：设置 %s 失败：%v", pragma, err)
 		}
 	}
 	db.SetMaxOpenConns(1)
