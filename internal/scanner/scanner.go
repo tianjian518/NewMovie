@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,29 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client openlis
 	// 容器 restart 策略再拉起 → 无限重启。这里用「深度上限 + 已访问集合」双保险。
 	visited := make(map[string]bool)
 
+	// 实时进度回写：每 2 秒把当前进度（done/total/dirs/cursor）写入数据库，
+	// 让前端轮询 /api/libraries/:id/scan 时能看到真实进度，而不是全程 0/0 直到结束。
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				run.mu.Lock()
+				job.Done = run.done
+				job.Total = run.total
+				job.Dirs = run.dirs
+				job.Cursor = run.cursor
+				job.Skipped = run.skipped
+				run.mu.Unlock()
+				_ = st.UpdateScanJob(job)
+			case <-progressDone:
+				return
+			}
+		}
+	}()
+
 	// walk 只在「无法继续的致命错误」时返回 err（根目录读不到、上下文取消）。
 	// 子目录级别的问题一律降级成 warning 继续走 —— 一个没权限的子目录
 	// 不该让整个媒体库颗粒无收。
@@ -159,6 +183,7 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client openlis
 	}
 
 	err := walk(lib.RootPath, 0, true)
+	close(progressDone) // 停止实时进度回写 goroutine
 	run.mu.Lock()
 	job.Done = run.done
 	job.Total = run.total
@@ -412,8 +437,46 @@ func (r *runner) scrapeFor(item model.MediaItem, dir, fileName string, names []s
 		}
 	}
 
+	// 目录名中的 {tmdb-xxx} 格式（Emby/Jellyfin/Plex 通用的强制指定 TMDB ID 方式）。
+	// 优先级低于 .vidrive.json，但高于自动搜索——用户既然在目录名里写了 TMDB ID，
+	// 就不该再去猜，直接用它。遍历 dirChain 从近到远找第一个命中的。
+	if manual == nil {
+		for _, d := range r.dirChain(dir) {
+			if id := extractTMDBIDFromName(d); id > 0 {
+				manual = &scraper.ManualMeta{TMDBID: id}
+				break
+			}
+		}
+	}
+
 	r.rl.Take() // 刮削（读 NFO / 调 TMDB）额外一次请求，仍走限速
 	_ = scraper.Scrape(r.ctx, item, r.lib, r.st, r.client, r.searcher, nfo, poster, backdrop, manual)
+}
+
+// extractTMDBIDFromName 从目录/文件名中提取 {tmdb-12345} 格式的 TMDB ID。
+// 支持 {tmdb-12345}、[tmdb-12345]、(tmdb-12345) 等常见变体，大小写不敏感。
+// 未命中返回 0。
+func extractTMDBIDFromName(name string) int64 {
+	// 用正则太重量级，这里用简单的字符串查找：找 "tmdb-" 后面的数字。
+	low := strings.ToLower(name)
+	idx := strings.Index(low, "tmdb-")
+	if idx < 0 {
+		return 0
+	}
+	// 从 "tmdb-" 之后开始提取数字
+	start := idx + 5
+	end := start
+	for end < len(name) && name[end] >= '0' && name[end] <= '9' {
+		end++
+	}
+	if end == start {
+		return 0
+	}
+	id, err := strconv.ParseInt(name[start:end], 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // probe 读取一个候选文本文件（NFO / .vidrive.json），返回内容与是否可读。
