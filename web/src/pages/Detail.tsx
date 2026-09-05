@@ -156,6 +156,16 @@ export default function Detail() {
 
   const sorted = sortEpisodes(files);
 
+  // 按季分组：多季剧集显示季标题，方便浏览；单季剧集保持扁平列表。
+  const seasons: { no: number; eps: typeof sorted }[] = [];
+  for (const f of sorted) {
+    const sn = Math.max(1, f.season_no || 1);
+    let s = seasons.find((x) => x.no === sn);
+    if (!s) { s = { no: sn, eps: [] }; seasons.push(s); }
+    s.eps.push(f);
+  }
+  const multiSeason = seasons.length > 1;
+
   // 「下一集」智能续播（借鉴 Emby）：找到用户最后看到一半的那集，
   // 如果还有下一集就显示快捷按钮，不用在剧集列表里翻找。
   // 看完超过 90% 视为已看完，不再作为「续播起点」。
@@ -238,37 +248,49 @@ export default function Detail() {
 
       <h2 className="text-lg font-bold mt-6 mb-3">文件 / 剧集（{files.length}）</h2>
       {files.length === 0 && <p className="text-gray-500 text-sm">该条目下暂无文件。</p>}
-      <div className="space-y-2">
-        {sorted.map((f) => {
-          const p = progress[f.id];
-          const pct = p && p.duration > 0 ? Math.min(100, Math.round((p.position / p.duration) * 100)) : 0;
-          return (
-            <Link
-              key={f.id}
-              to={"/play/" + f.id}
-              className="block bg-card rounded px-4 py-2 hover:ring-2 hover:ring-brand"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <span className="truncate">
-                  {f.episode_no > 0 && (
-                    <span className="text-brand mr-2">
-                      {f.season_no > 1 ? `S${f.season_no}E${f.episode_no}` : `第 ${f.episode_no} 集`}
-                    </span>
-                  )}
-                  {f.path.split("/").pop()}
-                </span>
-                <span className="text-xs text-gray-400 shrink-0">
-                  {p ? `看到 ${fmtTime(p.position)}` : `${f.container || "?"} · ${f.source}`}
-                </span>
-              </div>
-              {pct > 0 && (
-                <div className="h-0.5 bg-white/10 rounded mt-1.5">
-                  <div className="h-full bg-brand rounded" style={{ width: pct + "%" }} />
-                </div>
-              )}
-            </Link>
-          );
-        })}
+      <div className="space-y-4">
+        {seasons.map((s) => (
+          <div key={s.no}>
+            {multiSeason && (
+              <h3 className="text-sm font-semibold text-gray-300 mb-2 flex items-center gap-2">
+                <span className="bg-brand/20 text-brand px-2 py-0.5 rounded text-xs">第 {s.no} 季</span>
+                <span className="text-gray-500 text-xs">{s.eps.length} 集</span>
+              </h3>
+            )}
+            <div className="space-y-2">
+              {s.eps.map((f) => {
+                const p = progress[f.id];
+                const pct = p && p.duration > 0 ? Math.min(100, Math.round((p.position / p.duration) * 100)) : 0;
+                return (
+                  <Link
+                    key={f.id}
+                    to={"/play/" + f.id}
+                    className="block bg-card rounded px-4 py-2 hover:ring-2 hover:ring-brand"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="truncate">
+                        {f.episode_no > 0 && (
+                          <span className="text-brand mr-2">
+                            {multiSeason ? `S${s.no}E${f.episode_no}` : `第 ${f.episode_no} 集`}
+                          </span>
+                        )}
+                        {f.path.split("/").pop()}
+                      </span>
+                      <span className="text-xs text-gray-400 shrink-0">
+                        {p ? `看到 ${fmtTime(p.position)}` : `${f.container || "?"} · ${f.source}`}
+                      </span>
+                    </div>
+                    {pct > 0 && (
+                      <div className="h-0.5 bg-white/10 rounded mt-1.5">
+                        <div className="h-full bg-brand rounded" style={{ width: pct + "%" }} />
+                      </div>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       {showMatch && (
