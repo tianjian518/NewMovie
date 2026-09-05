@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS libraries (
 	storage_id TEXT NOT NULL DEFAULT '',
 	root_path TEXT NOT NULL DEFAULT '',
 	scan_rate REAL NOT NULL DEFAULT 2,
+	icon TEXT NOT NULL DEFAULT '',
+	color TEXT NOT NULL DEFAULT '',
+	sort_order INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS media_items (
@@ -192,6 +195,10 @@ func NewSQLiteStore(path string) (Store, error) {
 	// 列已存在时 ALTER 会报错，忽略即可（幂等）。
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN child_mode INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN allowed_libs TEXT NOT NULL DEFAULT ''")
+	// libraries 表新增自定义字段（图标/颜色/排序），旧库需要补列
+	_, _ = db.Exec("ALTER TABLE libraries ADD COLUMN icon TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE libraries ADD COLUMN color TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE libraries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 	s := &sqliteStore{db: db}
 	// 自动迁移：目标 SQLite 空，且同目录存在旧 JSON → 导入。
 	if err := s.migrateIfEmpty(filepath.Dir(path)); err != nil {
@@ -424,17 +431,19 @@ func (s *sqliteStore) DeleteStorage(id string) error {
 // ---- 媒体库 ----
 
 func (s *sqliteStore) SaveLibrary(x model.Library) error {
-	_, err := s.db.Exec(`INSERT INTO libraries (id,name,mode,storage_id,root_path,scan_rate,created_at)
-		VALUES(?,?,?,?,?,?,?)
+	_, err := s.db.Exec(`INSERT INTO libraries (id,name,mode,storage_id,root_path,scan_rate,icon,color,sort_order,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, mode=excluded.mode, storage_id=excluded.storage_id,
-			root_path=excluded.root_path, scan_rate=excluded.scan_rate, created_at=excluded.created_at`,
-		x.ID, x.Name, string(x.Mode), x.StorageID, x.RootPath, x.ScanRate, x.CreatedAt)
+			root_path=excluded.root_path, scan_rate=excluded.scan_rate,
+			icon=excluded.icon, color=excluded.color, sort_order=excluded.sort_order,
+			created_at=excluded.created_at`,
+		x.ID, x.Name, string(x.Mode), x.StorageID, x.RootPath, x.ScanRate, x.Icon, x.Color, x.SortOrder, x.CreatedAt)
 	return err
 }
 
 func (s *sqliteStore) ListLibraries() ([]model.Library, error) {
-	rows, err := s.db.Query(`SELECT id,name,mode,storage_id,root_path,scan_rate,created_at FROM libraries`)
+	rows, err := s.db.Query(`SELECT id,name,mode,storage_id,root_path,scan_rate,icon,color,sort_order,created_at FROM libraries ORDER BY sort_order ASC, created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +452,7 @@ func (s *sqliteStore) ListLibraries() ([]model.Library, error) {
 	for rows.Next() {
 		var x model.Library
 		var mode string
-		if err := rows.Scan(&x.ID, &x.Name, &mode, &x.StorageID, &x.RootPath, &x.ScanRate, &x.CreatedAt); err != nil {
+		if err := rows.Scan(&x.ID, &x.Name, &mode, &x.StorageID, &x.RootPath, &x.ScanRate, &x.Icon, &x.Color, &x.SortOrder, &x.CreatedAt); err != nil {
 			return nil, err
 		}
 		x.Mode = model.LibraryMode(mode)
@@ -455,8 +464,8 @@ func (s *sqliteStore) ListLibraries() ([]model.Library, error) {
 func (s *sqliteStore) GetLibrary(id string) (model.Library, error) {
 	var x model.Library
 	var mode string
-	err := s.db.QueryRow(`SELECT id,name,mode,storage_id,root_path,scan_rate,created_at FROM libraries WHERE id=?`, id).
-		Scan(&x.ID, &x.Name, &mode, &x.StorageID, &x.RootPath, &x.ScanRate, &x.CreatedAt)
+	err := s.db.QueryRow(`SELECT id,name,mode,storage_id,root_path,scan_rate,icon,color,sort_order,created_at FROM libraries WHERE id=?`, id).
+		Scan(&x.ID, &x.Name, &mode, &x.StorageID, &x.RootPath, &x.ScanRate, &x.Icon, &x.Color, &x.SortOrder, &x.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Library{}, os.ErrNotExist
 	}

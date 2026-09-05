@@ -99,6 +99,8 @@ export const api = {
     req<Library>("/api/libraries", { method: "POST", body: JSON.stringify(l) }),
   deleteLibrary: (id: string) =>
     req<{ ok: boolean }>("/api/libraries/" + id, { method: "DELETE" }),
+  updateLibrary: (id: string, patch: Partial<Library>) =>
+    req<Library>("/api/libraries/" + id, { method: "PUT", body: JSON.stringify(patch) }),
   libraryItems: (id: string) => req<MediaItem[]>("/api/libraries/" + id + "/items"),
   scan: (id: string) =>
     req<{ job_id: string; status: string }>("/api/libraries/" + id + "/scan", {

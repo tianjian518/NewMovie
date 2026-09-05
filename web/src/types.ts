@@ -18,6 +18,9 @@ export interface Library {
   storage_id: string;
   root_path: string;
   scan_rate: number;
+  icon?: string;      // 自定义图标（emoji）
+  color?: string;     // 自定义主题色（hex）
+  sort_order?: number; // 排序顺序
 }
 
 export interface MediaItem {

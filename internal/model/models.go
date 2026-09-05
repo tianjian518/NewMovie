@@ -50,6 +50,9 @@ type Library struct {
 	StorageID string      `json:"storage_id"` // 关联存储源
 	RootPath  string      `json:"root_path"`  // OpenList 内部路径 或 strm 目录
 	ScanRate  float64     `json:"scan_rate"`  // 覆盖存储源限速
+	Icon      string      `json:"icon"`       // 自定义图标（emoji，如 🎬📺🎮）
+	Color     string      `json:"color"`      // 自定义主题色（hex，如 #6366f1），用于卡片渐变
+	SortOrder int         `json:"sort_order"` // 排序顺序（越小越靠前）
 	CreatedAt int64       `json:"created_at"`
 }
 

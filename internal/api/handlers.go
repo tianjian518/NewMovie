@@ -744,6 +744,45 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 			return
 		}
 		writeJSON(w, map[string]interface{}{"ok": true})
+	case len(parts) == 3 && r.Method == http.MethodPut:
+		cur, _ := s.requireUser(r)
+		if !cur.IsAdmin {
+			writeErr(w, http.StatusForbidden, "仅管理员可编辑媒体库")
+			return
+		}
+		existing, err := s.Store.GetLibrary(parts[2])
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "媒体库不存在")
+			return
+		}
+		var patch struct {
+			Name      *string `json:"name"`
+			Icon      *string `json:"icon"`
+			Color     *string `json:"color"`
+			SortOrder *int    `json:"sort_order"`
+			ScanRate  *float64 `json:"scan_rate"`
+		}
+		if err := readJSON(r, &patch); err != nil {
+			writeErr(w, http.StatusBadRequest, "请求体错误")
+			return
+		}
+		if patch.Name != nil {
+			existing.Name = *patch.Name
+		}
+		if patch.Icon != nil {
+			existing.Icon = *patch.Icon
+		}
+		if patch.Color != nil {
+			existing.Color = *patch.Color
+		}
+		if patch.SortOrder != nil {
+			existing.SortOrder = *patch.SortOrder
+		}
+		if patch.ScanRate != nil {
+			existing.ScanRate = *patch.ScanRate
+		}
+		_ = s.Store.SaveLibrary(existing)
+		writeJSON(w, existing)
 	case len(parts) == 4 && parts[3] == "items" && r.Method == http.MethodGet:
 		lib, err := s.Store.GetLibrary(parts[2])
 		if err != nil {
