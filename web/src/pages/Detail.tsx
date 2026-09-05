@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { api, isAdmin } from "../api";
 import type { MediaItem, MediaFile } from "../types";
 import PosterCard from "../components/PosterCard";
+import PosterRow from "../components/PosterRow";
 
 // 按季、集排序；无集号的（电影/未识别）沉底并按文件名排，
 // 否则网盘返回什么顺序就显示什么顺序，13 集会乱序排列。
@@ -97,6 +98,7 @@ export default function Detail() {
   const [loading, setLoading] = useState(true);
   const [showMatch, setShowMatch] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [related, setRelated] = useState<MediaItem[]>([]);
 
   const load = useCallback(() => {
     if (!id) return;
@@ -108,6 +110,12 @@ export default function Detail() {
         setFiles(r.files || []);
         setProgress(r.progress || {});
         setFavored(!!r.favored);
+        // 相关推荐：同媒体库随机挑 12 部，排除当前条目，增加发现感
+        if (r.item?.library_id) {
+          api.search({ library: r.item.library_id, sort: "random", limit: 15 })
+            .then((res) => setRelated(res.items.filter((x) => x.id !== id).slice(0, 12)))
+            .catch(() => {});
+        }
       })
       .catch((e: any) => setErr(e?.message || "加载失败"))
       .finally(() => setLoading(false));
@@ -292,6 +300,13 @@ export default function Detail() {
           </div>
         ))}
       </div>
+
+      {related.length > 0 && (
+        <section className="mt-8">
+          <h2 className="text-lg font-bold mb-3">相关推荐</h2>
+          <PosterRow items={related} empty="" />
+        </section>
+      )}
 
       {showMatch && (
         <MatchDialog
