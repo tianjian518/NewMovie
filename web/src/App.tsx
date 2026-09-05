@@ -143,6 +143,7 @@ const modeLabel = (m: string) =>
 function Dashboard() {
   const [cont, setCont] = useState<ContinueRow[]>([]);
   const [recent, setRecent] = useState<MediaItem[]>([]);
+  const [random, setRandom] = useState<MediaItem[]>([]);
   const [libs, setLibs] = useState<LibraryType[]>([]);
   // 每个媒体库的最近添加条目，按库 ID 归集，用于首页直接铺海报行。
   const [libItems, setLibItems] = useState<Record<string, MediaItem[]>>({});
@@ -153,6 +154,7 @@ function Dashboard() {
     Promise.all([
       api.listContinue().then(setCont).catch(() => {}),
       api.search({ sort: "recent", limit: 18 }).then((r) => setRecent(r.items)).catch(() => {}),
+      api.search({ sort: "random", limit: 12 }).then((r) => setRandom(r.items)).catch(() => {}),
       api.listLibraries().then(setLibs).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, []);
@@ -192,6 +194,21 @@ function Dashboard() {
         {loading ? <p className="text-gray-400 text-sm">加载中…</p> :
           <PosterRow items={recent} empty="还没有内容，去「媒体库」扫描导入吧。" />}
       </section>
+
+      {random.length > 0 && (
+        <section>
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="text-xl font-bold">随机推荐</h2>
+            <button
+              onClick={() => api.search({ sort: "random", limit: 12 }).then((r) => setRandom(r.items)).catch(() => {})}
+              className="text-sm text-blue-400 hover:text-blue-300 shrink-0"
+            >
+              换一批 ↻
+            </button>
+          </div>
+          <PosterRow items={random} empty="" />
+        </section>
+      )}
 
       {libs.map((l) => (
         <section key={l.id}>

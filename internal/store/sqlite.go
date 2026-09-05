@@ -625,6 +625,8 @@ func (s *sqliteStore) SearchMediaItems(q, kind, libID, sortBy string, offset, li
 		order = "rating DESC, title"
 	case "recent":
 		order = "created_at DESC, title"
+	case "random":
+		order = "RANDOM()"
 	}
 	sql := "SELECT id,library_id,kind,tmdb_id,title,year,overview,poster_url,backdrop_url,rating," +
 		"poster_path,poster_storage_id,backdrop_path,backdrop_storage_id,created_at FROM media_items WHERE " +
