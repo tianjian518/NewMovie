@@ -43,7 +43,9 @@ var seasonDirRe = regexp.MustCompile(`(?i)^(season\s*\d{1,2}|s\d{1,2}|第\s*[0-9
 
 // 纯集数标题：把集数标记去掉后什么都不剩，说明文件名里根本没有剧名
 // （典型如 AutoFilm/strm 生成的「第15集.mp4.strm」「E05.strm」「[01].strm」）。
-var epOnlyRe = regexp.MustCompile(`(?i)^(第\s*\d{1,3}\s*[集话話期]|ep?\s*\d{1,3}|\[\d{1,3}\]|\d{1,3}|s\d{1,2}\s*e\d{1,3})$`)
+// 纯数字支持到 6 位：BluRay 原盘 STREAM/00001.m2ts 是 5 位数字，
+// 少于 1 位或多于 6 位的纯数字更可能是年份或异常文件名，不当作纯集数。
+var epOnlyRe = regexp.MustCompile(`(?i)^(第\s*\d{1,3}\s*[集话話期]|ep?\s*\d{1,3}|\[\d{1,3}\]|\d{1,6}|s\d{1,2}\s*e\d{1,3})$`)
 
 // IsSeasonDir 判断目录名是否是「季/特辑」这类不含剧名的中间层。
 func IsSeasonDir(name string) bool {

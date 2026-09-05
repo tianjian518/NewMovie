@@ -166,6 +166,12 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client openlis
 			}
 			full := path.Join(p, o.Name)
 			if o.IsDir {
+				// 跳过 BluRay 原盘目录（BDMV/）：其下 STREAM/00001.m2ts 等是纯数字文件名，
+				// 无法识别剧名和季集，且原盘播放需要特殊处理，暂时跳过避免产生垃圾条目。
+				if strings.EqualFold(o.Name, "BDMV") {
+					run.warn("跳过 BluRay 原盘目录：%s", full)
+					continue
+				}
 				if err := walk(full, depth+1, false); err != nil {
 					return err // 只可能是 ctx 取消，需要一路冒泡
 				}
