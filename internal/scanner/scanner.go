@@ -91,6 +91,7 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client openlis
 		ctx: ctx, lib: lib, st: st, client: client,
 		storages: storages, rewrites: rewrites, searcher: searcher, rl: rl,
 		onProgress: onProgress,
+		dirCache:   make(map[string][]string),
 	}
 
 	// TMDB 健康检查：扫描开始时探测一次，不可用就跳过所有刮削。
@@ -280,10 +281,11 @@ type runner struct {
 	onProgress func(done, total int)
 	force      bool // 强制重刮（忽略已有缓存）；rescrape 用
 
-	mu     sync.Mutex
-	done   int
-	total  int
-	cursor string
+	mu        sync.Mutex
+	done      int
+	total     int
+	cursor    string
+	dirCache  map[string][]string // 父目录文件清单缓存，避免重复探测
 
 	dirs       int      // 已成功列举的目录数
 	skipped    int      // 因模式不匹配跳过的文件总数
@@ -502,6 +504,32 @@ func extractTMDBIDFromName(name string) int64 {
 	return id
 }
 
+// listDirCached 获取目录的文件清单（带缓存），避免重复调用 OpenList API。
+// 扫描过程中大量 findUp 会反复探测同一批父目录，缓存后每个目录只请求一次。
+func (r *runner) listDirCached(dir string) []string {
+	r.mu.Lock()
+	if cached, ok := r.dirCache[dir]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.mu.Unlock()
+
+	r.rl.Take()
+	objs, err := r.client.List(dir, false)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(objs))
+	for _, o := range objs {
+		names = append(names, o.Name)
+	}
+
+	r.mu.Lock()
+	r.dirCache[dir] = names
+	r.mu.Unlock()
+	return names
+}
+
 // probe 读取一个候选文本文件（NFO / .vidrive.json），返回内容与是否可读。
 // 优先走 OpenList（native/mixed），失败再回退本地文件（ModeStrm 指向本地目录时）。
 // 读不到（不存在/无权限）返回 ("", false)。
@@ -517,20 +545,19 @@ func (r *runner) probe(p string) (string, bool) {
 
 // findUp 在「同目录 + 向上若干层父目录」中查找名为 fileName 的文件，返回首个命中的完整路径。
 // 用于 tvshow.nfo / poster.jpg / .vidrive.json 不在视频同目录、而在剧集根目录的场景。
-// 同目录优先用 names 清单（零请求）；父目录逐层用 probe 探测存在性（命中即停，最多 6 层）。
+// 同目录优先用 names 清单（零请求）；父目录用 listDirCached 获取清单（带缓存，每目录只请求一次）。
 func (r *runner) findUp(dir, fileName string, names []string) string {
-	has := func(name string) bool {
-		for _, s := range names {
-			if strings.EqualFold(s, name) {
+	has := func(list []string) bool {
+		for _, s := range list {
+			if strings.EqualFold(s, fileName) {
 				return true
 			}
 		}
 		return false
 	}
-	if has(fileName) {
+	if has(names) {
 		return path.Join(dir, fileName)
 	}
-	r.rl.Take() // 父目录探测同样走限速
 	cur := dir
 	for i := 0; i < 6; i++ {
 		parent := path.Dir(cur)
@@ -538,9 +565,9 @@ func (r *runner) findUp(dir, fileName string, names []string) string {
 			break
 		}
 		cur = parent
-		cand := path.Join(cur, fileName)
-		if _, ok := r.probe(cand); ok {
-			return cand
+		parentNames := r.listDirCached(cur)
+		if has(parentNames) {
+			return path.Join(cur, fileName)
 		}
 	}
 	return ""
