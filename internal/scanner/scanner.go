@@ -23,6 +23,50 @@ import (
 	"newmovie/internal/subtitle"
 )
 
+// inferCodecsFromName 从文件名推断音视频编码（扫描时预填，probe 失败时兜底）。
+// 发布组命名规范：H265/HEVC/x265、H264/AVC/x264、AV1、VP9；DDP/Atmos、DTS、AAC、FLAC 等。
+// 这是「播放不卡顿」的关键兜底：光鸭等 CDN 的 Range 不可靠导致 ffprobe 读不到 moov atom，
+// 若没有文件名推断，HEVC 文件会被误判为 H264 走直链，Chrome 直接黑屏。
+func inferCodecsFromName(name string) (video, audio string) {
+	n := strings.ToLower(name)
+	// 视频编码（按特异性从高到低匹配）
+	switch {
+	case strings.Contains(n, "av1"):
+		video = "av1"
+	case strings.Contains(n, "vp9") || strings.Contains(n, "vp09"):
+		video = "vp9"
+	case strings.Contains(n, "h265") || strings.Contains(n, "hevc") || strings.Contains(n, "x265"):
+		video = "h265"
+	case strings.Contains(n, "h264") || strings.Contains(n, "avc") || strings.Contains(n, "x264"):
+		video = "h264"
+	case strings.Contains(n, "vc-1") || strings.Contains(n, "vc1"):
+		video = "vc1"
+	case strings.Contains(n, "mpeg2") || strings.Contains(n, "mpeg-2"):
+		video = "mpeg2"
+	}
+	// 音频编码（按特异性从高到低匹配）
+	switch {
+	case strings.Contains(n, "truehd"):
+		audio = "truehd"
+	case strings.Contains(n, "ddp") || strings.Contains(n, "atmos") || strings.Contains(n, "eac3") || strings.Contains(n, "e-ac-3"):
+		audio = "eac3"
+	case strings.Contains(n, "dd5.1") || strings.Contains(n, "dd 5.1") || (strings.Contains(n, "dd") && !strings.Contains(n, "ddp")):
+		audio = "ac3"
+	case strings.Contains(n, "dts") || strings.Contains(n, "dts-hd") || strings.Contains(n, "dtshd"):
+		audio = "dts"
+	case strings.Contains(n, "flac"):
+		audio = "flac"
+	case strings.Contains(n, "aac"):
+		audio = "aac"
+	case strings.Contains(n, "mp3"):
+		audio = "mp3"
+	case strings.Contains(n, "opus"):
+		audio = "opus"
+	}
+	return video, audio
+}
+
+
 // MaxScanDepth 是目录递归的最大深度。
 // 真实媒体库极少超过 10 层（库根/剧名/季/文件），设为 24 已非常宽松；
 // 超过它几乎必然是目录成环或异常挂载，继续下钻只会把内存耗尽。
@@ -627,6 +671,7 @@ func ingestNative(st store.Store, lib model.Library, storages []model.Storage, r
 	// 取回规范化后的 item（去重合并后），供刮削使用
 	saved := resolveItem(st, item)
 
+	vc, ac := inferCodecsFromName(o.Name)
 	f := model.MediaFile{
 		ID:         "f-" + hash(full),
 		ItemID:     saved.ID,
@@ -636,6 +681,8 @@ func ingestNative(st store.Store, lib model.Library, storages []model.Storage, r
 		Size:       int64(o.Size),
 		Modified:   int64(o.Modified),
 		Container:  containerOf(o.Name),
+		VideoCodec: vc,
+		AudioCodec: ac,
 		SeasonNo:   pr.Season,
 		EpisodeNo:  pr.Episode,
 		Subtitles:  subs,
@@ -677,6 +724,7 @@ func IngestStrm(st store.Store, lib model.Library, storages []model.Storage, rew
 
 	// 文件 ID 必须按完整路径生成：不同剧里同名的「第1集.mp4.strm」若只按文件名 hash，
 	// 会算出同一个 ID 而互相覆盖，后导入的剧会「吃掉」先导入那部剧的分集。
+	vc, ac := inferCodecsFromName(strmName)
 	f := model.MediaFile{
 		ID:         "f-" + hash(path.Join(strmpath, strmName)),
 		ItemID:     saved.ID,
@@ -685,6 +733,8 @@ func IngestStrm(st store.Store, lib model.Library, storages []model.Storage, rew
 		Path:       res.Path,
 		StrmRaw:    raw,
 		Container:  containerFromURL(raw),
+		VideoCodec: vc,
+		AudioCodec: ac,
 		SeasonNo:   pr.Season,
 		EpisodeNo:  pr.Episode,
 		Subtitles:  subs,
