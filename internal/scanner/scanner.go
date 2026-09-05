@@ -95,14 +95,18 @@ func Scan(ctx context.Context, lib model.Library, st store.Store, client openlis
 
 	// TMDB 健康检查：扫描开始时探测一次，不可用就跳过所有刮削。
 	// 否则每集都会等 10s 超时 × 2 个备用域名 = 20s，138 集要等 46 分钟，
-	// 用户看到的就是「扫描卡住了」。这里用 5s 超时快速探测，失败则置空 searcher。
+	// 用户看到的就是「扫描卡住了」。这里用 3s 超时快速探测，失败则置空 searcher。
 	if run.searcher != nil {
-		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-		_, probeErr := run.searcher.Search(probeCtx, "movie", "a", 0)
+		log.Printf("[scan] 开始 TMDB 健康检查（3s 超时）...")
+		probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Second)
+		_, probeErr := run.searcher.Search(probeCtx, "movie", "test", 0)
 		probeCancel()
 		if probeErr != nil {
+			log.Printf("[scan] TMDB 健康检查失败：%v，本次扫描跳过刮削", probeErr)
 			run.warn("TMDB API 不可用（%v），本次扫描跳过刮削，仅入库文件。可稍后在设置中检查 API Key 或网络后重新扫描。", probeErr)
 			run.searcher = nil
+		} else {
+			log.Printf("[scan] TMDB 健康检查通过，启用刮削")
 		}
 	}
 
