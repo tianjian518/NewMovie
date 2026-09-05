@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -156,8 +157,23 @@ func NewSQLiteStore(path string) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// SQLite 单写者：单连接避免并发写锁（database is locked）。
-	// 读多写少场景（媒体库浏览/播放为主），单连接足够且最稳。
+	// SQLite 健壮性配置：
+	// - WAL 模式：读写并发更好，崩溃恢复能力强，进程被强制杀死时不易损坏
+	// - busy_timeout=5000：锁等待超时 5 秒，避免 "database is locked"
+	// - synchronous=NORMAL：WAL 模式下的最佳平衡，性能好且不会损坏
+	// - temp_store=MEMORY：临时表放内存，减少磁盘 I/O
+	// - 单连接：SQLite 单写者模型，避免并发写锁
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA temp_store=MEMORY",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("设置 %s 失败: %w", pragma, err)
+		}
+	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if _, err := db.Exec(schemaSQL); err != nil {
