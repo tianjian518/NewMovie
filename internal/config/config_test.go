@@ -100,3 +100,30 @@ func TestBoolenv(t *testing.T) {
 		}
 	}
 }
+
+// 自动定时扫描：VIDRIVE_SCAN_INTERVAL 解析成 Go duration，非法值保持关闭。
+func TestLoad_ScanIntervalParsing(t *testing.T) {
+	t.Setenv("VIDRIVE_SCAN_INTERVAL", "30m")
+	if c := Load(); c.ScanInterval != 30*time.Minute {
+		t.Errorf("ScanInterval = %v，期望 30m", c.ScanInterval)
+	}
+	t.Setenv("VIDRIVE_SCAN_INTERVAL", "1h")
+	if c := Load(); c.ScanInterval != time.Hour {
+		t.Errorf("ScanInterval = %v，期望 1h", c.ScanInterval)
+	}
+	// 未设置保持关闭（与 1.x 一致）。
+	t.Setenv("VIDRIVE_SCAN_INTERVAL", "")
+	if c := Load(); c.ScanInterval != 0 {
+		t.Errorf("未设置时 ScanInterval = %v，期望 0（关闭）", c.ScanInterval)
+	}
+	// 非法值回退 0，绝不能变成疯狂扫描。
+	t.Setenv("VIDRIVE_SCAN_INTERVAL", "not-a-duration")
+	if c := Load(); c.ScanInterval != 0 {
+		t.Errorf("非法值时 ScanInterval = %v，期望 0（关闭）", c.ScanInterval)
+	}
+	// 负值/零值同样关闭。
+	t.Setenv("VIDRIVE_SCAN_INTERVAL", "-1h")
+	if c := Load(); c.ScanInterval != 0 {
+		t.Errorf("负值时 ScanInterval = %v，期望 0（关闭）", c.ScanInterval)
+	}
+}

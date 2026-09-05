@@ -22,6 +22,7 @@ services:
       # - NEWMOVIE_BUNDLED=0
       #
       # VIDRIVE_SCAN_RATE=2   # 全局默认扫描限速 req/s（风控友好）
+      # VIDRIVE_SCAN_INTERVAL=30m   # 媒体库自动定时扫描（增量，网盘新增剧集自动入库；留空=关闭）
       # VIDRIVE_TRANSCODE=1   # 开启视频转码（HEVC→H.264），CPU 开销大，按需开
     restart: unless-stopped
     # 内存上限：2.0 是双进程（139cas 自身约 100~200MB），比 1.x 需要更多余量。

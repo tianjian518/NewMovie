@@ -817,21 +817,28 @@ func (s *Server) handleLibraries(w http.ResponseWriter, r *http.Request, parts [
 
 // --- 扫描 ---
 
-func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string) {
-	cur, _ := s.requireUser(r)
-	if !cur.IsAdmin {
-		writeErr(w, http.StatusForbidden, "仅管理员可触发扫描")
-		return
-	}
+// errScanBusy 媒体库已在扫描中（并发保护，HTTP 层映射为 409）。
+var errScanBusy = errors.New("该媒体库正在扫描中")
+
+// errScanPrecheck 扫描预检失败（根路径读不到）。HTTP 层映射为 400，错误文本即
+// scanner.FriendlyErr 的友好提示。
+var errScanPrecheck = errors.New("媒体库根路径不可访问")
+
+// scanLibrary 对指定媒体库执行一次异步增量扫描（内部入口，HTTP 与定时任务共用）。
+//
+// 语义：
+//   - 立即返回：真正的遍历在后台协程里做（scanner.Scan），本函数只做预检与排程；
+//   - 幂等/防抖：tryLockScan 保证同一媒体库同一时刻只有一个扫描协程，扫不完的调用直接返回 errScanBusy；
+//   - 增量：scanner.Scan 内部按 path+size+mtime 三元组对比，未变更目录整棵跳过；
+//   - 限速：默认 2 req/s 令牌桶 + refresh=false 复用 OpenList 缓存，风控友好。
+func (s *Server) scanLibrary(libID string) error {
 	lib, err := s.Store.GetLibrary(libID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "媒体库不存在")
-		return
+		return err
 	}
 	st, err := s.Store.GetStorage(lib.StorageID)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "媒体库未绑定存储源")
-		return
+		return err
 	}
 	storages, _ := s.Store.ListStorages()
 	rewrites, _ := s.Store.ListPathRewrites()
@@ -843,18 +850,13 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string)
 		rate = s.Cfg.DefaultRate
 	}
 	if !s.tryLockScan(lib.ID) {
-		w.WriteHeader(http.StatusConflict)
-		writeJSON(w, map[string]interface{}{
-			"job_id": "job-" + lib.ID, "status": "running",
-			"error": "该媒体库正在扫描中，请等待本次扫描结束",
-		})
-		return
+		return errScanBusy
 	}
 	cl := s.clientFor(st)
 
 	// 预检：扫描是异步的，根目录读不到的话用户要等到轮询才知道，
 	// 中间那段时间只会看到一个空白页面在转圈。这里先同步探一次，
-	// 路径错了立刻退 400 并说清楚错在哪。
+	// 路径错了立刻返回错误说清楚错在哪。
 	lib.RootPath = openlist.NormalizePath(lib.RootPath)
 	if _, err := cl.List(lib.RootPath, false); err != nil {
 		s.unlockScan(lib.ID)
@@ -864,11 +866,7 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string)
 			Error: scanner.FriendlyErr(lib.RootPath, err),
 		}
 		_ = s.Store.SaveScanJob(job)
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]interface{}{
-			"job_id": job.ID, "status": "failed", "error": job.Error,
-		})
-		return
+		return fmt.Errorf("%w: %s", errScanPrecheck, job.Error)
 	}
 	searcher := s.newSearcher()
 	// 用脱离请求的 context：避免 HTTP 响应返回后请求 ctx 被取消而中断后台扫描。
@@ -890,7 +888,87 @@ func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string)
 		}()
 		_ = scanner.Scan(bg, lib, s.Store, cl, storages, rewrites, rate, searcher, nil)
 	}()
-	writeJSON(w, map[string]interface{}{"job_id": "job-" + lib.ID, "status": "running"})
+	return nil
+}
+
+func (s *Server) startScan(w http.ResponseWriter, r *http.Request, libID string) {
+	cur, _ := s.requireUser(r)
+	if !cur.IsAdmin {
+		writeErr(w, http.StatusForbidden, "仅管理员可触发扫描")
+		return
+	}
+	lib, err := s.Store.GetLibrary(libID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "媒体库不存在")
+		return
+	}
+	switch err := s.scanLibrary(libID); {
+	case err == nil:
+		writeJSON(w, map[string]interface{}{"job_id": "job-" + lib.ID, "status": "running"})
+	case errors.Is(err, errScanBusy):
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]interface{}{
+			"job_id": "job-" + lib.ID, "status": "running",
+			"error": errScanBusy.Error(),
+		})
+	case errors.Is(err, errScanPrecheck):
+		job := model.ScanJob{
+			ID: "job-" + lib.ID, LibraryID: lib.ID, Status: "failed",
+			StartedAt: model.NowMillis(), FinishedAt: model.NowMillis(),
+			Error: strings.TrimPrefix(err.Error(), errScanPrecheck.Error()+": "),
+		}
+		_ = s.Store.SaveScanJob(job)
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]interface{}{
+			"job_id": job.ID, "status": "failed", "error": job.Error,
+		})
+	default:
+		writeErr(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+// StartScheduledScanner 按配置间隔对所有媒体库执行自动增量扫描。
+//
+// 仅当 cfg.ScanInterval > 0（如环境变量 VIDRIVE_SCAN_INTERVAL=30m）时启用；
+// 否则静默返回，行为与 1.x 完全一致（仅手动/API 触发扫描）。
+//
+// 设计要点：
+//   - 不阻断：立即返回，真正的轮询在后台 goroutine 里做，服务照常启动；
+//   - 防抖：scanLibrary 内部的 tryLockScan 保证同一媒体库同一时刻只有一个扫描协程，
+//     一轮扫不完的库下个周期自动补齐，不会互相踩踏；
+//   - 幂等：重复调用只会多起一个 ticker，调用方应在启动时只调用一次；
+//   - 安静：没有媒体库或全库扫描中时只记日志，不打扰。
+func (s *Server) StartScheduledScanner() {
+	if s.Cfg == nil || s.Cfg.ScanInterval <= 0 {
+		return
+	}
+	go func() {
+		interval := s.Cfg.ScanInterval
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		log.Printf("[scan] 自动定时扫描已启用，间隔 %s（所有媒体库增量扫描）", interval)
+		for range ticker.C {
+			libs, err := s.Store.ListLibraries()
+			if err != nil {
+				log.Printf("[scan] 定时扫描获取媒体库列表失败: %v", err)
+				continue
+			}
+			if len(libs) == 0 {
+				continue
+			}
+			for _, lib := range libs {
+				if err := s.scanLibrary(lib.ID); err != nil {
+					if errors.Is(err, errScanBusy) {
+						log.Printf("[scan] 定时扫描跳过 %q（上一轮还在扫描中）", lib.Name)
+					} else {
+						log.Printf("[scan] 定时扫描 %q 失败: %v", lib.Name, err)
+					}
+					continue
+				}
+				log.Printf("[scan] 定时扫描已触发 %q（新增内容自动入库）", lib.Name)
+			}
+		}
+	}()
 }
 
 // --- 条目 / 海报墙 ---

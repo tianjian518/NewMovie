@@ -50,6 +50,7 @@ NewMovie 的立场（详见 [`PLAN.md`](./PLAN.md)）：
 - **STRM 方言全适配**：完整直链 / 带签名 / URL 编码 / 纯内部路径 / 服务中转 / 本地绝对路径 / 相对路径 + BOM/CRLF/中文坑。
 - **路径重写规则**：存量 strm 里写死 `http://localhost:5244/...`？一条正则搞定，不必重生成几万个文件。
 - **风控友好**：令牌桶限速（默认 2 req/s）、增量扫描、指数退避、`refresh=false` 复用缓存。
+- **自动定时扫描**（可选）：`VIDRIVE_SCAN_INTERVAL=30m` 开启后，后台按间隔对所有媒体库执行增量扫描，**网盘新增剧集自动入库**，无需手动点「扫描」；增量 diff + 单库并发锁，扫不完的周期自动跳过。
 - **海报墙 + 详情 + 播放进度 + 继续观看 + 收藏**：Emby 深色紧凑 + 大图海报墙。
 - **刮削元数据更准**：
   - **NFO 优先**：同目录 `.nfo`（movie / tvshow / episodedetails）给出 tmdb id、标题、年份、简介、远程图。
@@ -102,6 +103,7 @@ docker build \
 | `VIDRIVE_ADMIN_USER` | `admin` | 管理员用户名 |
 | `VIDRIVE_ADMIN_PASS` | `admin` | 管理员密码（**生产务必修改**） |
 | `VIDRIVE_SCAN_RATE` | `2` | 全局默认扫描限速（req/s，风控友好） |
+| `VIDRIVE_SCAN_INTERVAL` | _(空，关闭)_ | 媒体库**自动定时扫描**间隔（Go duration，如 `30m` / `1h` / `6h`）。开启后后台按该间隔对所有媒体库执行增量扫描（path+size+mtime 三元组 diff，未变更目录整棵跳过），网盘新增剧集/电影自动入库；同一媒体库同一时刻只有一个扫描协程，扫不完的周期自动跳过。留空/`0` = 关闭，仅手动或 API 触发 |
 | `TMDB_API_KEY` | _(空)_ | TMDB API Key；**留空则跳过 TMDB**，仅靠 NFO（同目录 `.nfo` / 本地图）与文件名识别刮削。也可在「设置」页填入并持久化（环境变量优先） |
 
 ### 2.0 内置网盘

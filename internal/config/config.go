@@ -2,6 +2,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +23,11 @@ type Config struct {
 	                	// /api/image 服务端取图（浏览器只跟 8096 入口，无需直连 CDN）。
 	ProxyRefresh bool   // 默认 refresh=false 复用 OpenList 缓存
 	DefaultRate  float64
+	// ScanInterval 媒体库自动定时扫描间隔。0 表示关闭（默认，保持 1.x 行为）。
+	// 开启后（如 VIDRIVE_SCAN_INTERVAL=30m），后台按该间隔对所有媒体库执行
+	// 增量扫描（path+size+mtime 三元组 diff，未变更目录整棵跳过），
+	// 网盘里新增的剧集/电影会被自动发现入库，无需手动点「扫描」。
+	ScanInterval time.Duration
 	// TranscodeEnabled 是否允许视频转码（HEVC→H264 等）。默认关：转码是 CPU 黑洞。
 	// 仅当浏览器本身解不了某编码（多数 Firefox / 部分 Chrome 不解码 HEVC）且用户
 	// 又想页内播放时才开。前端「设置」里的开关会覆盖此项（持久化 transcode_enabled）。
@@ -77,6 +83,15 @@ func Load() *Config {
 	if r := os.Getenv("VIDRIVE_SCAN_RATE"); r != "" {
 		if v, err := strconv.ParseFloat(r, 64); err == nil && v > 0 {
 			c.DefaultRate = v
+		}
+	}
+	// 自动定时扫描：VIDRIVE_SCAN_INTERVAL 支持 Go duration（30m / 1h / 6h 等）。
+	// 解析失败或 ≤0 时保持关闭——宁可不开也不因配置笔误把服务拖进疯狂扫描。
+	if v := os.Getenv("VIDRIVE_SCAN_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.ScanInterval = d
+		} else if err != nil {
+			log.Printf("警告：VIDRIVE_SCAN_INTERVAL=%q 不是合法时长（如 30m/1h），自动扫描保持关闭: %v", v, err)
 		}
 	}
 

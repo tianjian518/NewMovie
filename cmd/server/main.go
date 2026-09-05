@@ -49,6 +49,9 @@ func main() {
 	}
 
 	srv := api.New(st, cfg)
+	// 可选：自动定时扫描（VIDRIVE_SCAN_INTERVAL=30m 等）。开启后按间隔对所有
+	// 媒体库执行增量扫描，网盘新增剧集自动入库；未配置则与 1.x 行为一致。
+	srv.StartScheduledScanner()
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Handler())
