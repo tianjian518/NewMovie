@@ -155,21 +155,34 @@ func Parse(name string) Result {
 	}
 
 	r := Result{}
+	epMarkerPos := -1 // 季集标记在 base 中的起始位置，用于截断标题（只取标记之前的剧名）
 
 	// 季集
-	if m := seasonEpRe.FindStringSubmatch(base); m != nil {
+	if m := seasonEpRe.FindStringIndex(base); m != nil {
 		r.IsSeries = true
-		r.Season, _ = strconv.Atoi(m[1])
-		r.Episode, _ = strconv.Atoi(m[2])
-	} else if m := chineseEPRe.FindStringSubmatch(base); m != nil {
+		epMarkerPos = m[0]
+		if sm := seasonEpRe.FindStringSubmatch(base); sm != nil {
+			r.Season, _ = strconv.Atoi(sm[1])
+			r.Episode, _ = strconv.Atoi(sm[2])
+		}
+	} else if m := chineseEPRe.FindStringIndex(base); m != nil {
 		r.IsSeries = true
-		r.Episode, _ = strconv.Atoi(m[1])
-	} else if m := bracketEPRe.FindStringSubmatch(base); m != nil {
+		epMarkerPos = m[0]
+		if sm := chineseEPRe.FindStringSubmatch(base); sm != nil {
+			r.Episode, _ = strconv.Atoi(sm[1])
+		}
+	} else if m := bracketEPRe.FindStringIndex(base); m != nil {
 		r.IsSeries = true
-		r.Episode, _ = strconv.Atoi(m[1])
-	} else if m := epRe.FindStringSubmatch(base); m != nil {
+		epMarkerPos = m[0]
+		if sm := bracketEPRe.FindStringSubmatch(base); sm != nil {
+			r.Episode, _ = strconv.Atoi(sm[1])
+		}
+	} else if m := epRe.FindStringIndex(base); m != nil {
 		r.IsSeries = true
-		r.Episode, _ = strconv.Atoi(m[1])
+		epMarkerPos = m[0]
+		if sm := epRe.FindStringSubmatch(base); sm != nil {
+			r.Episode, _ = strconv.Atoi(sm[1])
+		}
 	}
 	if r.Season == 0 && r.IsSeries {
 		r.Season = 1
@@ -185,7 +198,13 @@ func Parse(name string) Result {
 	}
 
 	// 标题：先去噪音，再砍掉年份/季集残留
-	title := noise.ReplaceAllString(base, " ")
+	// 关键：剧集文件名通常是「剧名.S01E01.集名.技术参数」格式，
+	// 季集标记之后的集名和技术参数必须全部丢弃，否则每集剧名不同、各自成条目。
+	titleBase := base
+	if epMarkerPos > 0 {
+		titleBase = base[:epMarkerPos]
+	}
+	title := noise.ReplaceAllString(titleBase, " ")
 	if r.Year > 0 {
 		title = strings.ReplaceAll(title, strconv.Itoa(r.Year), " ")
 	}
