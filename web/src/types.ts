@@ -60,6 +60,7 @@ export interface PlayDecision {
   label: string;
   reason: string;
   url: string;
+  proxy_url?: string; // 服务器反代播放 URL（直链失败时切换）
   raw_url: string;
   direct_url: string;
   use_raw_url: boolean;

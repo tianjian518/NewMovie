@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1503,12 +1504,24 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request, parts []stri
 			writeErr(w, http.StatusBadRequest, "缺少 u 参数")
 			return
 		}
+		// u 参数是 base64 编码的 URL（避免 +/& 等特殊字符被 query 解析破坏）。
+		// 用 RawURLEncoding（无 padding），避免 = 被 URL query 当作参数分隔符截断。
+		// 兼容：先试 RawURLEncoding，再试 URLEncoding（带 padding），都失败则回退到原值（旧版 url.QueryEscape 编码）。
+		if decoded, err := base64.RawURLEncoding.DecodeString(raw); err == nil {
+			raw = string(decoded)
+		} else if decoded, err := base64.URLEncoding.DecodeString(raw); err == nil {
+			raw = string(decoded)
+		}
 		target, err := parseOutboundURL(raw)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+		// 关键：用原始 raw 字符串构造请求，不用 target.String()。
+		// url.Parse 会把 query 中的 + 解析为空格，String() 又重新编码为 %20 或 +，
+		// 导致光鸭等 CDN 的 fid 参数（含 +）错乱，返回首页而非视频文件。
+		// parseOutboundURL 仅做安全检查（协议/主机名），实际请求保持原始 URL 不变。
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, raw, nil)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "构造请求失败")
 			return
@@ -2445,11 +2458,21 @@ func (s *Server) playItem(w http.ResponseWriter, r *http.Request, fileID string)
 		}
 	}
 
+	// 反代播放 URL：直链播放失败时（CDN Content-Type 不对、Range 不支持、防盗链等），
+	// 前端可切换到 /api/play/proxy 经服务器转发。服务器会修正 Content-Type 并透传 Range。
+	// 用 base64 编码 URL，避免 query 中的 +/&/? 被二次解析（url.QueryEscape 会把 + 编为 %2B，
+	// 但 r.URL.Query().Get() 解码后 url.Parse 又把 + 当空格，导致 CDN 参数错乱）。
+	proxyURL := ""
+	if src := playback.PickURL(in); src != "" {
+		proxyURL = appendToken("/api/play/proxy?u="+base64.RawURLEncoding.EncodeToString([]byte(src)), getToken(r))
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"level":           int(dec.Level),
 		"label":           dec.Label,
 		"reason":          dec.Reason,
 		"url":             dec.URL,
+		"proxy_url":       proxyURL,
 		"raw_url":         rawURL,
 		"direct_url":      directURL,
 		"use_raw_url":     dec.UseRawURL,
@@ -2497,6 +2520,53 @@ func nativeA(ac string) bool {
 // 本地 file:// 或相对路径不在此列（需走本地读盘或挂载映射逻辑）。
 func isStreamableURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// mimeByURL 根据 URL 扩展名推断视频 MIME 类型。
+// 网盘/CDN 常返回 binary/octet-stream，浏览器不认作视频，需要反代时修正。
+func mimeByURL(raw string) string {
+	path := strings.ToLower(raw)
+	// 去掉 query string
+	if i := strings.Index(path, "?"); i >= 0 {
+		path = path[:i]
+	}
+	switch {
+	case strings.HasSuffix(path, ".mp4") || strings.HasSuffix(path, ".m4v"):
+		return "video/mp4"
+	case strings.HasSuffix(path, ".webm"):
+		return "video/webm"
+	case strings.HasSuffix(path, ".ogg") || strings.HasSuffix(path, ".ogv"):
+		return "video/ogg"
+	case strings.HasSuffix(path, ".mov"):
+		return "video/quicktime"
+	case strings.HasSuffix(path, ".mkv"):
+		return "video/x-matroska"
+	case strings.HasSuffix(path, ".avi"):
+		return "video/x-msvideo"
+	case strings.HasSuffix(path, ".ts") || strings.HasSuffix(path, ".m2ts"):
+		return "video/mp2t"
+	case strings.HasSuffix(path, ".flv"):
+		return "video/x-flv"
+	case strings.HasSuffix(path, ".wmv"):
+		return "video/x-ms-wmv"
+	case strings.HasSuffix(path, ".m3u8"):
+		return "application/vnd.apple.mpegurl"
+	case strings.HasSuffix(path, ".mp3"):
+		return "audio/mpeg"
+	case strings.HasSuffix(path, ".aac"):
+		return "audio/aac"
+	case strings.HasSuffix(path, ".flac"):
+		return "audio/flac"
+	case strings.HasSuffix(path, ".ogg"):
+		return "audio/ogg"
+	case strings.HasSuffix(path, ".wav"):
+		return "audio/wav"
+	case strings.HasSuffix(path, ".srt") || strings.HasSuffix(path, ".vtt"):
+		return "text/vtt"
+	case strings.HasSuffix(path, ".ass") || strings.HasSuffix(path, ".ssa"):
+		return "text/plain"
+	}
+	return ""
 }
 
 func maxInt(a, b int) int {

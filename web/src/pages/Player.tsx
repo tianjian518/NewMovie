@@ -36,6 +36,7 @@ export default function Player() {
   const [subLang, setSubLang] = useState("off");
   const [audIdx, setAudIdx] = useState(-1);
   const [playErr, setPlayErr] = useState("");
+  const [useProxy, setUseProxy] = useState(false); // 直链播放失败时切换到服务器反代
   // L4 外部播放器进度回传的输入状态。必须放在顶层（所有 early return 之前），
   // 否则 dec 为 null 时 Hooks 调用顺序不一致，React 会报 "Rendered fewer hooks than expected"。
   const [minuteStr, setMinuteStr] = useState("");
@@ -92,10 +93,13 @@ export default function Player() {
     setPlayErr("");
     // L0 直链 / L1 代理 / L2 重封装 / L3 转码 都走页内 ArtPlayer。
     if ((dec.level === 0 || dec.level === 1 || dec.level === 2 || dec.level === 3) && dec.url) {
+      // L0 直链播放失败时可切换到服务器反代（修正 Content-Type、透传 Range）。
+      // L2/L3 已经走服务器 HLS，不需要反代。
+      const playURL = (useProxy && dec.level === 0 && dec.proxy_url) ? dec.proxy_url : dec.url;
       const art = new ArtPlayer({
         container: ref.current,
-        url: dec.url,
-        type: isHlsUrl(dec.url) ? "m3u8" : "auto",
+        url: playURL,
+        type: isHlsUrl(playURL) ? "m3u8" : "auto",
         autoplay: true,
         playbackRate: true,
         subtitle: { encoding: "utf-8" },
@@ -104,7 +108,11 @@ export default function Player() {
 
       // 视频加载/解码失败（如浏览器无 HEVC 解码器）：给出明确引导，而不是一片黑。
       const onErr = () => {
-        setPlayErr("视频加载失败：可能是浏览器不支持该编码（如 HEVC/H.265）。可在「设置」开启「允许视频转码(HEVC→H.264)」后重试，或点下方用外部播放器打开。");
+        if (dec.level === 0 && dec.proxy_url && !useProxy) {
+          setPlayErr("直链播放失败，可能是网盘/CDN 限制。点击下方「服务器反代播放」按钮重试。");
+        } else {
+          setPlayErr("视频加载失败：可能是浏览器不支持该编码（如 HEVC/H.265）。可在「设置」开启「允许视频转码(HEVC→H.264)」后重试，或点下方用外部播放器打开。");
+        }
       };
       art.on("error", onErr);
       if (art.video) art.video.addEventListener("error", onErr);
@@ -134,7 +142,7 @@ export default function Player() {
         art.destroy();
       };
     }
-  }, [dec, fileId]);
+  }, [dec, fileId, useProxy]);
 
   if (err) {
     return (
