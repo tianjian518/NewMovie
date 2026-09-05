@@ -426,6 +426,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleSettings(w, r)
 			return
+		case "cache":
+			s.handleCache(w, r, parts)
+			return
 		case "play":
 			s.handlePlay(w, r, parts)
 			return
@@ -2890,4 +2893,116 @@ func (s *Server) rescrapeItem(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true})
+}
+
+// handleCache 缓存管理（仅管理员）：
+//   GET  /api/cache          → 返回图片缓存和 HLS 缓存的统计（文件数、占用空间）
+//   POST /api/cache/clean    → 清理图片缓存（HLS 会话有自动清理，这里也强制停止所有会话）
+func (s *Server) handleCache(w http.ResponseWriter, r *http.Request, parts []string) {
+	u, ok := s.requireUser(r)
+	if !ok || !u.IsAdmin {
+		writeErr(w, http.StatusForbidden, "仅管理员可操作缓存")
+		return
+	}
+
+	// POST /api/cache/clean —— 清理缓存
+	if len(parts) >= 3 && parts[2] == "clean" && r.Method == http.MethodPost {
+		cleaned := int64(0)
+		files := 0
+
+		// 清理图片缓存
+		imgDir := filepath.Join(s.Cfg.CacheDir, "images")
+		if entries, err := os.ReadDir(imgDir); err == nil {
+			for _, e := range entries {
+				p := filepath.Join(imgDir, e.Name())
+				if info, err := os.Stat(p); err == nil {
+					cleaned += info.Size()
+					files++
+				}
+				os.Remove(p)
+			}
+		}
+
+		// 强制停止所有 HLS 会话并清理其切片目录
+		s.hlsMgr.Stop()
+
+		writeJSON(w, map[string]interface{}{
+			"ok":      true,
+			"files":   files,
+			"freed":   cleaned,
+			"message": fmt.Sprintf("已清理 %d 个缓存文件，释放 %s", files, humanizeBytes(cleaned)),
+		})
+		return
+	}
+
+	// GET /api/cache —— 缓存统计
+	if r.Method == http.MethodGet {
+		imgCount := 0
+		imgSize := int64(0)
+		imgDir := filepath.Join(s.Cfg.CacheDir, "images")
+		if entries, err := os.ReadDir(imgDir); err == nil {
+			for _, e := range entries {
+				p := filepath.Join(imgDir, e.Name())
+				if info, err := os.Stat(p); err == nil && !info.IsDir() {
+					imgCount++
+					imgSize += info.Size()
+				}
+			}
+		}
+
+		// HLS 会话数和切片大小
+		hlsSessions := 0
+		hlsSize := int64(0)
+		hlsDir := s.hlsMgr.Dir()
+		if entries, err := os.ReadDir(hlsDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					hlsSessions++
+					sub := filepath.Join(hlsDir, e.Name())
+					if subEntries, err := os.ReadDir(sub); err == nil {
+						for _, se := range subEntries {
+							p := filepath.Join(sub, se.Name())
+							if info, err := os.Stat(p); err == nil && !info.IsDir() {
+								hlsSize += info.Size()
+							}
+						}
+					}
+				}
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"images": map[string]interface{}{
+				"count": imgCount,
+				"size":  imgSize,
+				"human": humanizeBytes(imgSize),
+			},
+			"hls": map[string]interface{}{
+				"sessions": hlsSessions,
+				"size":     hlsSize,
+				"human":    humanizeBytes(hlsSize),
+			},
+			"total": map[string]interface{}{
+				"size":  imgSize + hlsSize,
+				"human": humanizeBytes(imgSize + hlsSize),
+			},
+		})
+		return
+	}
+
+	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+// humanizeBytes 把字节数格式化为人类可读字符串（KB/MB/GB）。
+func humanizeBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }

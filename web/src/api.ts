@@ -165,4 +165,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ api_key, api_base }),
     }),
+
+  getCacheStats: () =>
+    req<{
+      images: { count: number; size: number; human: string };
+      hls: { sessions: number; size: number; human: string };
+      total: { size: number; human: string };
+    }>("/api/cache"),
+  cleanCache: () =>
+    req<{ ok: boolean; files: number; freed: number; message: string }>("/api/cache/clean", { method: "POST" }),
 };

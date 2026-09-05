@@ -11,6 +11,7 @@ export default function Settings() {
       {admin && <TmdbPanel />}
       {admin && <StoragePanel />}
       {admin && <RewritePanel />}
+      {admin && <CachePanel />}
       {admin && <StrmTips />}
       {!admin && (
         <p className="text-sm text-gray-500">
@@ -258,6 +259,78 @@ function StrmTips() {
         <li>本地绝对路径（CloudDrive2）：<code>/mnt/cd2/quark/x.mkv</code></li>
         <li>相对路径（Kodi）：<code>流浪地球.mkv</code></li>
       </ul>
+    </section>
+  );
+}
+
+// 缓存管理：显示图片缓存和 HLS 转码缓存的占用，一键清理。
+// 图片缓存会随刮削增长（海报/背景图），HLS 切片有自动清理但手动清理更彻底。
+function CachePanel() {
+  const [stats, setStats] = useState<{
+    images: { count: number; human: string };
+    hls: { sessions: number; human: string };
+    total: { human: string };
+  } | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    api.getCacheStats().then(setStats).catch(() => {});
+  };
+  useEffect(load, []);
+
+  async function clean() {
+    if (!confirm("确定清理所有缓存？海报图会重新下载，正在进行的转码会中断。")) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const r = await api.cleanCache();
+      setMsg(r.message);
+      load();
+    } catch (e: any) {
+      setMsg("清理失败：" + (e?.message || "未知错误"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="text-xl font-bold mb-3">缓存管理</h2>
+      <div className="bg-card rounded-xl p-4 space-y-3">
+        {stats ? (
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="bg-ink rounded p-3">
+              <div className="text-gray-400">图片缓存</div>
+              <div className="text-lg font-bold mt-1">{stats.images.human}</div>
+              <div className="text-xs text-gray-500">{stats.images.count} 个文件</div>
+            </div>
+            <div className="bg-ink rounded p-3">
+              <div className="text-gray-400">HLS 转码缓存</div>
+              <div className="text-lg font-bold mt-1">{stats.hls.human}</div>
+              <div className="text-xs text-gray-500">{stats.hls.sessions} 个会话</div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500">加载中...</p>
+        )}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={clean}
+            disabled={busy}
+            className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded text-sm font-medium"
+          >
+            {busy ? "清理中..." : "一键清理缓存"}
+          </button>
+          <button onClick={load} className="px-4 py-2 bg-ink hover:bg-white/10 rounded text-sm">
+            刷新
+          </button>
+        </div>
+        {msg && <p className="text-sm text-green-400">{msg}</p>}
+        <p className="text-xs text-gray-500">
+          图片缓存包含海报和背景图，清理后下次访问会重新从 TMDB 下载。HLS 缓存是转码临时切片，会话结束后自动清理。
+        </p>
+      </div>
     </section>
   );
 }
