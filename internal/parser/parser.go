@@ -20,6 +20,10 @@ type Result struct {
 // 常见噪音词，刮削前清理。
 var noise = regexp.MustCompile(`(?i)\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|（[^）]*）|【[^】]*】|WEB-DL|WEBRip|BluRay|BDRip|HDTV|HDR|DV|REMUX|HYSUB|字幕组|字幕|国语|英语|中字|双语|官译|特效|内封|内嵌|外挂|4K|2160p|1080p|720p|480p|H264|H265|HEVC|x264|x265|AVC|10bit|8bit|FLAC|AAC|DTS-HD\.MA|DTS-HD|DTS-HR|DTS-ES|DTS|TrueHD|Atmos|MP4|MKV|WEB|全集|合集|HIFI|DDP|DD5\.1|DD2\.0|EAC3|E-AC-3|AC3|MP3|OPUS|PCM|LPCM|DTS-HD|DTS-HR|MA\.|H\.264|H\.265|H\.266|AV1|VP9|VC-1|MPEG2|XviD|DivX|PROPER|REPACK|INTERNAL|EXTENDED|UNRATED|THEATRICAL|DIRECTORS|CUT|IMAX|REMASTERED|ANIME|ANiME|FLUX|NTb|NTG|KiNGS|CRiMSON|AMZN|ATVP|DSNP|NF|HULU|HMAX|PMTP|iT|iTunes|Google|YouTube|Red|Spotify|Tidal|Qobuz|Deezer|SoundCloud|\bMA\b|\bHD\b|\b5\.1\b|\b7\.1\b|\b2\.0\b|\b1\.0\b`)
 
+// NoiseRegex 返回标题清理用的 noise 正则，供其他包（如扫描器字幕匹配）复用。
+func NoiseRegex() *regexp.Regexp { return noise }
+
+
 // 年份
 var yearRe = regexp.MustCompile(`(19|20)\d{2}`)
 

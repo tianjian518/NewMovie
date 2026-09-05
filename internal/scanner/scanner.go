@@ -442,9 +442,13 @@ func (r *runner) consumeStrm(dir string, names []string, o openlist.FsObj) error
 
 // detectSubtitles 从同目录文件清单里挑出属于该媒体的外挂字幕。
 // 规则：字幕基名等于媒体基名，或以「媒体基名.」开头（如 Movie.zh.srt / Movie.chi.ass）。
+// 关键：媒体文件名常含技术参数（Movie.2160p.WEB-DL.H265.mp4），而字幕文件通常是
+// Movie.zh.srt，直接比较基名匹配不上。因此同时用「清理技术参数后的标题」做二次匹配。
 // 语言与显示名由文件名里的语言标记推断（subtitle.DetectLang）。
 func detectSubtitles(dir, mediaBase string, names []string, storageID string) []model.Subtitle {
 	var out []model.Subtitle
+	// 清理媒体基名中的技术参数，用于二次匹配（字幕文件通常不含技术参数）
+	cleanMediaBase := cleanTitleForSubMatch(mediaBase)
 	for _, n := range names {
 		ext := strings.ToLower(containerOf(n))
 		if !subtitle.IsSubtitleExt(ext) {
@@ -454,7 +458,14 @@ func detectSubtitles(dir, mediaBase string, names []string, storageID string) []
 		if i := strings.LastIndex(n, "."); i > 0 {
 			base = n[:i]
 		}
-		if base != mediaBase && !strings.HasPrefix(base, mediaBase+".") {
+		// 一级匹配：原始基名完全相等或以 mediaBase. 开头
+		matched := base == mediaBase || strings.HasPrefix(base, mediaBase+".")
+		// 二级匹配：清理技术参数后的基名匹配（处理 Movie.2160p.WEB-DL vs Movie.zh 的情况）
+		if !matched && cleanMediaBase != "" {
+			cleanSubBase := cleanTitleForSubMatch(base)
+			matched = cleanSubBase == cleanMediaBase || strings.HasPrefix(cleanSubBase, cleanMediaBase+".")
+		}
+		if !matched {
 			continue
 		}
 		lang, title := subtitle.DetectLang(n)
@@ -469,6 +480,17 @@ func detectSubtitles(dir, mediaBase string, names []string, storageID string) []
 		})
 	}
 	return out
+}
+
+// cleanTitleForSubMatch 清理文件名中的技术参数，用于字幕匹配的二次比较。
+// 去掉常见的分辨率/编码/音频/来源标记，保留核心标题。
+func cleanTitleForSubMatch(name string) string {
+	// 复用 parser 的 noise 正则清理技术参数
+	cleaned := parser.NoiseRegex().ReplaceAllString(name, " ")
+	cleaned = strings.ReplaceAll(cleaned, ".", " ")
+	cleaned = strings.ReplaceAll(cleaned, "_", " ")
+	cleaned = strings.TrimSpace(strings.Join(strings.Fields(cleaned), " "))
+	return cleaned
 }
 
 // scrapeFor 计算同目录 NFO/本地图候选路径并刮削。
